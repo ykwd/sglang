@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Constants
 BUFFER_SIZE_GB = 4
 BUFFER_SIZE_BYTES = BUFFER_SIZE_GB * 1024 * 1024 * 1024
-SLICE_SIZE_BYTES = 4 * 1024 * 1024  # 1GB slice
+SLICE_SIZE_BYTES = 16 * 1024 * 1024  # 16MB slice
 
 
 def create_buffer_tensor(buffer_size_bytes: int, name: str) -> torch.Tensor:
@@ -142,37 +142,51 @@ def run_mooncake_benchmark():
         put_buffer.random_()
         logger.info("Put buffer filled with random data")
 
-        # Use just one slice
+        # Split buffer into slices
         slice_elements = SLICE_SIZE_BYTES // 4  # For float32
-        # Generate a random string key
-        key = "".join(random.choices(string.ascii_letters + string.digits, k=16))
+        total_slices = BUFFER_SIZE_BYTES // SLICE_SIZE_BYTES
 
-        logger.info(f"Using single slice with {slice_elements} elements")
-        logger.info(f"Generated random key: {key}")
+        logger.info(f"Buffer split into {total_slices} slices")
+        logger.info(f"Each slice has {slice_elements} elements")
 
-        # Get pointer to the first slice in the put buffer
-        put_slice_ptr = put_buffer[:slice_elements].data_ptr()
+        # Generate random keys for all slices
+        keys = []
+        for i in range(total_slices):
+            key = "".join(random.choices(string.ascii_letters + string.digits, k=16))
+            keys.append(key)
 
-        # Perform put operation
-        logger.info("Starting put operation...")
+        logger.info(f"Generated {total_slices} random keys")
+
+        # Prepare pointers and sizes for all slices
+        put_ptrs = []
+        put_sizes = []
+        for i in range(total_slices):
+            slice_start = i * slice_elements
+            slice_end = slice_start + slice_elements
+            slice_ptr = put_buffer[slice_start:slice_end].data_ptr()
+            put_ptrs.append(slice_ptr)
+            put_sizes.append(SLICE_SIZE_BYTES)
+
+        # Perform batch put operation
+        logger.info("Starting batch put operation...")
         put_start_time = time.time()
 
-        result = store.batch_put_from([key], [put_slice_ptr], [SLICE_SIZE_BYTES])
+        result = store.batch_put_from(keys, put_ptrs, put_sizes)
 
         put_time = time.time() - put_start_time
-        logger.info(f"Put operation completed in {put_time:.4f} seconds")
+        logger.info(f"Batch put operation completed in {put_time:.4f} seconds")
 
-        # Check if operation succeeded (result should be list with 0 for success)
-        if result[0] != 0:
-            logger.error(f"Put failed, result: {result}")
+        # Check if all operations succeeded (result should be list of 0s for success)
+        if not all(r == 0 for r in result):
+            logger.error(f"Batch put failed, result: {result}")
             return False
 
         # Verify data exists
         logger.info("Verifying data exists...")
         exists_start_time = time.time()
 
-        exists_result = store.batch_is_exist([key])
-        if exists_result[0] != 1:
+        exists_result = store.batch_is_exist(keys)
+        if not all(r == 1 for r in exists_result):
             logger.error("Data existence check failed")
             return False
 
@@ -181,50 +195,68 @@ def run_mooncake_benchmark():
             f"Data existence verification completed in {exists_time:.4f} seconds"
         )
 
-        # Get pointer to the first slice in the get buffer
-        get_slice_ptr = get_buffer[:slice_elements].data_ptr()
+        # Prepare pointers and sizes for get operation
+        get_ptrs = []
+        get_sizes = []
+        for i in range(total_slices):
+            slice_start = i * slice_elements
+            slice_end = slice_start + slice_elements
+            slice_ptr = get_buffer[slice_start:slice_end].data_ptr()
+            get_ptrs.append(slice_ptr)
+            get_sizes.append(SLICE_SIZE_BYTES)
 
-        # Perform get operation
-        logger.info("Starting get operation...")
+        # Perform batch get operation
+        logger.info("Starting batch get operation...")
         get_start_time = time.time()
 
-        result = store.batch_get_into([key], [get_slice_ptr], [SLICE_SIZE_BYTES])
+        result = store.batch_get_into(keys, get_ptrs, get_sizes)
 
         get_time = time.time() - get_start_time
-        logger.info(f"Get operation completed in {get_time:.4f} seconds")
+        logger.info(f"Batch get operation completed in {get_time:.4f} seconds")
 
-        # Check if operation succeeded (result should be list with 0 for success)
-        if result[0] < 0:
-            logger.error(f"Get failed, result: {result}")
+        # Check if all operations succeeded (result should be list of 0s for success)
+        if not all(r >= 0 for r in result):
+            logger.error(f"Batch get failed, result: {result}")
             return False
 
-        # Verify data integrity by comparing the first slice
+        # Verify data integrity by comparing all slices
         logger.info("Verifying data integrity...")
-        put_slice = put_buffer[:slice_elements]
-        get_slice = get_buffer[:slice_elements]
+        integrity_verified = True
+        for i in range(total_slices):
+            slice_start = i * slice_elements
+            slice_end = slice_start + slice_elements
+            put_slice = put_buffer[slice_start:slice_end]
+            get_slice = get_buffer[slice_start:slice_end]
 
-        if torch.allclose(put_slice, get_slice, atol=1e-6):
-            logger.info("✅ Data integrity verified - slice data matches exactly")
+            if not torch.allclose(put_slice, get_slice, atol=1e-6):
+                logger.error(f"❌ Data integrity check failed for slice {i}")
+                integrity_verified = False
+                break
+
+        if integrity_verified:
+            logger.info("✅ Data integrity verified - all slice data matches exactly")
         else:
             logger.error("❌ Data integrity check failed")
             return False
 
         # Calculate performance metrics
-        data_size_mb = SLICE_SIZE_BYTES / (1024 * 1024)
-        put_throughput = data_size_mb / put_time
-        get_throughput = data_size_mb / get_time
+        total_data_size_mb = (total_slices * SLICE_SIZE_BYTES) / (1024 * 1024)
+        put_throughput = total_data_size_mb / put_time
+        get_throughput = total_data_size_mb / get_time
 
         # Print results
         logger.info("=" * 60)
         logger.info("BENCHMARK RESULTS")
         logger.info("=" * 60)
         logger.info(f"Buffer size: {BUFFER_SIZE_GB} GB")
-        logger.info(f"Data size: {data_size_mb:.2f} MB")
-        logger.info(f"Put time: {put_time:.4f} seconds")
-        logger.info(f"Get time: {get_time:.4f} seconds")
+        logger.info(f"Total data size: {total_data_size_mb:.2f} MB")
+        logger.info(f"Number of slices: {total_slices}")
+        logger.info(f"Slice size: {SLICE_SIZE_BYTES / (1024 * 1024):.2f} MB")
+        logger.info(f"Batch put time: {put_time:.4f} seconds")
+        logger.info(f"Batch get time: {get_time:.4f} seconds")
         logger.info(f"Data verification time: {exists_time:.4f} seconds")
-        logger.info(f"Put throughput: {put_throughput:.2f} MB/s")
-        logger.info(f"Get throughput: {get_throughput:.2f} MB/s")
+        logger.info(f"Batch put throughput: {put_throughput:.2f} MB/s")
+        logger.info(f"Batch get throughput: {get_throughput:.2f} MB/s")
         logger.info("=" * 60)
 
         return True
