@@ -163,6 +163,8 @@ def run_benchmark_with_slice_size(
     logger.info(f"Average exists latency per batch: {avg_exists_latency:.2f} ms")
     logger.info(f"Exists latency for {slices_per_batch} slices per batch")
 
+    time.sleep(1)
+
     # Prepare batch get operations
     logger.info("Starting batch get operations...")
     get_start_time = time.time()
@@ -203,37 +205,60 @@ def run_benchmark_with_slice_size(
     get_time = time.time() - get_start_time
     logger.info(f"All batch get operations completed in {get_time:.4f} seconds")
 
-    # Verify data integrity for a few sample slices
-    logger.info("Verifying data integrity for sample slices...")
-    sample_indices = [0, 100, 1000, 2000, 3000]  # Sample different parts of the data
+    # Verify data integrity by comparing entire buffers byte by byte
+    logger.info("Verifying data integrity by comparing entire buffers...")
 
+    # Memory-efficient verification: compare in small chunks to avoid GPU memory overflow
+    logger.info("Performing memory-efficient data integrity verification...")
+
+    # Calculate the total number of elements that were actually used
+    total_elements_used = total_slices * slice_elements
+
+    # Use a small chunk size to avoid memory issues
+    chunk_size = 1024 * 1024  # 1M elements per chunk (4MB)
     integrity_verified = True
-    for sample_idx in sample_indices:
-        if sample_idx >= total_slices:
-            continue
+    max_diff = 0.0
+    total_diff_count = 0
 
-        # Get original data from set buffer
-        slice_start = sample_idx * slice_elements
-        slice_end = slice_start + slice_elements
-        original_data = set_buffer_tensor[slice_start:slice_end]
+    logger.info(f"Comparing {total_elements_used} elements in chunks of {chunk_size}")
 
-        # Get retrieved data from get buffer
-        retrieved_data = get_buffer_tensor[slice_start:slice_end]
+    for chunk_start in range(0, total_elements_used, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, total_elements_used)
 
-        # Compare
-        if not torch.allclose(original_data, retrieved_data, atol=1e-6):
-            logger.error(f"❌ Data integrity check failed for slice {sample_idx}")
-            diff = torch.abs(original_data - retrieved_data)
-            logger.error(f"Max difference: {torch.max(diff):.6f}")
-            logger.error(f"Mean difference: {torch.mean(diff):.6f}")
+        # Get chunks from both buffers
+        set_chunk = set_buffer_tensor[chunk_start:chunk_end]
+        get_chunk = get_buffer_tensor[chunk_start:chunk_end]
+
+        # Compare this chunk using element-wise operations
+        chunk_diff = torch.abs(set_chunk - get_chunk)
+        chunk_max_diff = torch.max(chunk_diff).item()
+
+        if chunk_max_diff > 1e-6:  # Check if any element differs by more than tolerance
             integrity_verified = False
-        else:
-            logger.info(f"✅ Slice {sample_idx} integrity verified")
+            chunk_diff_count = torch.count_nonzero(chunk_diff).item()
+
+            max_diff = max(max_diff, chunk_max_diff)
+            total_diff_count += chunk_diff_count
+
+            logger.error(
+                f"❌ Data integrity check failed in chunk {chunk_start//chunk_size}"
+            )
+            logger.error(f"Chunk range: [{chunk_start}, {chunk_end})")
+            logger.error(f"Chunk max difference: {chunk_max_diff:.6f}")
+            logger.error(f"Chunk non-zero differences: {chunk_diff_count}")
 
     if integrity_verified:
-        logger.info("✅ All sample slices integrity verified")
+        logger.info("✅ Data integrity verified - all data matches exactly")
     else:
-        logger.error("❌ Some sample slices failed integrity check")
+        logger.error("❌ Data integrity check failed")
+        logger.error(f"Overall max difference: {max_diff:.6f}")
+        logger.error(f"Total non-zero differences: {total_diff_count}")
+        logger.error(f"Total elements compared: {total_elements_used}")
+        exit(1)
+
+    # Clear GPU cache after verification to free temporary tensors
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Performance metrics
     total_data_size_gb = (total_slices * slice_size_bytes) / (1024 * 1024 * 1024)
@@ -284,6 +309,7 @@ def benchmark_mooncake_store():
         logger.info("Creating two 4GB buffer tensors...")
         set_buffer_tensor = create_4gb_buffer_tensor()
         get_buffer_tensor = create_4gb_buffer_tensor()
+
         buffer_size = set_buffer_tensor.numel() * set_buffer_tensor.element_size()
         logger.info(
             f"Each buffer tensor size: {buffer_size / (1024 * 1024 * 1024):.2f} GB"
