@@ -122,9 +122,12 @@ def run_benchmark_with_slice_size(
             batch_sizes.append(slice_size_bytes)
 
         # Perform batch set - updated to use new interface without values parameter
-        store.batch_set(
+        result = store.batch_set(
             batch_keys, target_location=batch_ptrs, target_sizes=batch_sizes
         )
+        if not result:
+            logger.error(f"Batch set failed for batch {batch_idx}")
+            exit(1)
 
         if (batch_idx + 1) % 8 == 0:  # Log progress every 8 batches
             logger.info(f"Completed {batch_idx + 1}/{num_batches} batch set operations")
@@ -186,9 +189,13 @@ def run_benchmark_with_slice_size(
             batch_sizes.append(slice_size_bytes)
 
         # Perform batch get - updated to use new interface without values parameter
-        store.batch_get(
+        result = store.batch_get(
             batch_keys, target_location=batch_ptrs, target_sizes=batch_sizes
         )
+
+        if result != len(batch_keys) // 2:
+            logger.error(f"Batch get failed for batch {batch_idx}")
+            exit(1)
 
         if (batch_idx + 1) % 8 == 0:  # Log progress every 8 batches
             logger.info(f"Completed {batch_idx + 1}/{num_batches} batch get operations")
