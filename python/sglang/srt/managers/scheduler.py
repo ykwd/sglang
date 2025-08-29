@@ -787,7 +787,22 @@ class Scheduler(
             self.cur_batch = batch
 
             if batch:
+                # Record start time when batch is launched
+                batch.start_time = time.time()
                 result = self.run_batch(batch)
+                # Record end time and print execution duration
+                batch.end_time = time.time()
+                duration = batch.end_time - batch.start_time
+                batch_info = f"mode={batch.forward_mode}"
+                if batch.reqs:
+                    batch_info += f", reqs={len(batch.reqs)}"
+                if batch.seq_lens_sum:
+                    batch_info += f", total_tokens={batch.seq_lens_sum}"
+                if hasattr(batch, "seq_lens") and batch.seq_lens is not None:
+                    batch_info += f", seq_lens={batch.seq_lens.tolist()}"
+                print(
+                    f"Batch execution completed - Duration: {duration:.4f}s - {batch_info}"
+                )
                 self.process_batch_result(batch, result)
             else:
                 # When the server is idle, do self-check and re-init some states
@@ -804,11 +819,14 @@ class Scheduler(
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
+            # print(f"ykwd get_next_batch_to_run, overlap")
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
             if batch:
                 batch.launch_done = threading.Event()
+                # Record start time when batch is launched
+                batch.start_time = time.time()
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -828,6 +846,33 @@ class Scheduler(
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
                 )
+                # Record end time and print execution duration
+                if tmp_batch.start_time is not None:
+                    tmp_batch.end_time = time.time()
+                    duration = tmp_batch.end_time - tmp_batch.start_time
+                    batch_info = f"mode={tmp_batch.forward_mode}"
+                    # Add batch type information (decode/prefill)
+                    if tmp_batch.forward_mode.is_decode():
+                        batch_info += ", type=decode"
+                    elif tmp_batch.forward_mode.is_prefill():
+                        batch_info += ", type=prefill"
+                    else:
+                        batch_info += f", type=other({tmp_batch.forward_mode})"
+                    if tmp_batch.reqs:
+                        batch_info += f", reqs={len(tmp_batch.reqs)}"
+                        # Add last 4 chars of request IDs
+                        req_ids = [req.rid[-4:] for req in tmp_batch.reqs]
+                        batch_info += f", req_ids={req_ids}"
+                    if tmp_batch.seq_lens_sum:
+                        batch_info += f", total_tokens={tmp_batch.seq_lens_sum}"
+                    if (
+                        hasattr(tmp_batch, "seq_lens")
+                        and tmp_batch.seq_lens is not None
+                    ):
+                        batch_info += f", seq_lens={tmp_batch.seq_lens.tolist()}"
+                    print(
+                        f"Batch done. start_time: {tmp_batch.start_time:.2f}, end_time: {tmp_batch.end_time:.2f}, duration: {duration:.2f}s - {batch_info}"
+                    )
                 # NOTE: we should use current launched batch's launch_done event Instead of the last batch's
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
@@ -856,6 +901,7 @@ class Scheduler(
 
                 recv_reqs = self.recv_requests()
                 self.process_input_requests(recv_reqs)
+                # print(f"ykwd get_next_batch_to_run, mb_id: {mb_id}, pp_size: {self.pp_size}")
                 mbs[mb_id] = self.get_next_batch_to_run()
                 self.running_mbs[mb_id] = self.running_batch
 
@@ -1096,6 +1142,7 @@ class Scheduler(
                     )
                     self.send_to_tokenizer.send_pyobj(abort_req)
                     continue
+                print(f"ykwd recv_req: {recv_req.rid}, time: {time.monotonic():.2f}")
             output = self._request_dispatcher(recv_req)
             if output is not None:
                 if isinstance(output, RpcReqOutput):

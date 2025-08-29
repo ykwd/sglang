@@ -568,7 +568,21 @@ class HiCacheController:
 
     def terminate_prefetch(self, operation):
         operation.mark_done()
-        return operation.completed_tokens, operation.hash_value
+        if (
+            not hasattr(operation, "prefetch_start_time")
+            or operation.prefetch_start_time is None
+        ):
+            operation.prefetch_start_time = time.monotonic()
+        if (
+            not hasattr(operation, "prefetch_end_time")
+            or operation.prefetch_end_time is None
+        ):
+            operation.prefetch_end_time = time.monotonic()
+        return (
+            operation.completed_tokens,
+            operation.hash_value,
+            operation.prefetch_end_time - operation.prefetch_start_time,
+        )
 
     # zero copy
     def _3fs_zero_copy_page_get(self, operation, hash_values, host_indices):
@@ -617,7 +631,7 @@ class HiCacheController:
                 )
                 break
             self.mem_pool_host.set_from_flat_data_page(
-                host_indices[operation.completed_tokens],
+                host_indices[i * self.page_size],
                 page_data[i],
             )
             if not operation.increment(self.page_size):
@@ -675,6 +689,7 @@ class HiCacheController:
                 self.mem_pool_host.free(
                     operation.host_indices[operation.completed_tokens :]
                 )
+                operation.prefetch_end_time = time.monotonic()
             except Empty:
                 continue
 
@@ -721,6 +736,7 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
+                operation.prefetch_start_time = time.monotonic()
 
                 if (
                     operation.host_indices is not None
@@ -746,6 +762,9 @@ class HiCacheController:
                     if operation.host_indices is not None:
                         self.mem_pool_host.free(operation.host_indices)
                     logger.debug(
+                        f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
+                    )
+                    print(
                         f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
                     )
                 else:

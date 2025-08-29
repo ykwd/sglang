@@ -75,6 +75,7 @@ class HiRadixCache(RadixCache):
         self.prefetch_threshold = 256
         self.prefetch_timeout = 3  # seconds
         self.prefetch_stop_policy = hicache_storage_prefetch_policy
+        self.prefetch_completed_tokens = 0
 
         self.load_cache_event = threading.Event()
         self.cache_controller = HiCacheController(
@@ -112,6 +113,7 @@ class HiRadixCache(RadixCache):
         TreeNode.counter = 0
         self.cache_controller.reset()
         self.token_to_kv_pool_host.clear()
+        self.prefetch_completed_tokens = 0
         super().reset()
 
     def get_height(self, node: TreeNode):
@@ -430,9 +432,12 @@ class HiRadixCache(RadixCache):
         if self.prefetch_stop_policy == "best_effort":
             return can_terminate
 
-        completed = (
-            operation.completed_tokens == len(operation.hash_value) * self.page_size
-        )
+        if len(operation.hash_value) == 0:
+            completed = False
+        else:
+            completed = (
+                operation.completed_tokens == len(operation.hash_value) * self.page_size
+            )
 
         if self.prefetch_stop_policy == "wait_complete":
             can_terminate = completed
@@ -443,6 +448,9 @@ class HiRadixCache(RadixCache):
         else:
             # unknown prefetch stop policy, just return True
             return True
+        # print(f"Prefetch operation {operation.request_id} can_terminate: {can_terminate},"
+        #    f" completed: {completed}, time_duration: {time.monotonic() - operation.start_time:.2f},"
+        #    f" policy: {self.prefetch_stop_policy}, time: {time.monotonic():.2f}")
 
         if self.tp_world_size > 1:
             can_terminate = torch.tensor(can_terminate, dtype=torch.int)
@@ -473,10 +481,9 @@ class HiRadixCache(RadixCache):
         if not self.can_terminate_prefetch(operation):
             return False
 
-        completed_tokens, hash_value = self.cache_controller.terminate_prefetch(
-            operation
+        completed_tokens, hash_value, prefetch_exe_time = (
+            self.cache_controller.terminate_prefetch(operation)
         )
-        logger.debug(f"Prefetch {req_id} completed with {completed_tokens} tokens")
 
         min_completed_tokens = completed_tokens
         if self.tp_world_size > 1 and self.prefetch_stop_policy != "wait_complete":
@@ -490,6 +497,23 @@ class HiRadixCache(RadixCache):
                 group=self.tp_group,
             )
             min_completed_tokens = completed_tokens_tensor.item()
+        self.prefetch_completed_tokens += min_completed_tokens
+        logger.debug(f"Prefetch {req_id} completed with {min_completed_tokens} tokens")
+
+        # Calculate and print the total prefetched data size
+        kv_cache_size_per_token = self.token_to_kv_pool_host.get_size_per_token()
+        total_prefetch_completed_size = (
+            self.prefetch_completed_tokens * kv_cache_size_per_token / 1024 / 1024
+        )
+        prefetched_size = min_completed_tokens * kv_cache_size_per_token / 1024 / 1024
+        prefetch_speed = prefetched_size / (time.monotonic() - operation.start_time)
+        prefetch_exe_speed = prefetched_size / prefetch_exe_time
+        print(
+            f"Prefetch: {req_id} prefetched {min_completed_tokens}/{self.prefetch_completed_tokens} tokens, "
+            f"{prefetched_size:.2f}/{total_prefetch_completed_size:.2f} MB, speed: {prefetch_speed:.2f} MB/s, "
+            f"exe_time: {prefetch_exe_time:.2f} seconds, exe_speed: {prefetch_exe_speed:.2f} MB/s"
+        )
+
         fetched_token_ids = token_ids[:min_completed_tokens]
         written_indices = host_indices[:min_completed_tokens]
         matched_length = self._insert_helper_host(
