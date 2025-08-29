@@ -163,7 +163,7 @@ def run_benchmark_with_slice_size(
     logger.info(f"Average exists latency per batch: {avg_exists_latency:.2f} ms")
     logger.info(f"Exists latency for {slices_per_batch} slices per batch")
 
-    time.sleep(1)
+    # time.sleep(1)
 
     # Prepare batch get operations
     logger.info("Starting batch get operations...")
