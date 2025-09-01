@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 # Constants
 BUFFER_SIZE_GB = 4
 BUFFER_SIZE_BYTES = BUFFER_SIZE_GB * 1024 * 1024 * 1024
-SLICE_SIZE_BYTES = 16 * 1024 * 1024  # 16MB slice
+SLICE_SIZE_BYTES = 4 * 1024 * 1024  # 4MB slice
+CHUNK_SIZE_MB = 128  # 128MB chunk size for batch operations
+CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
 
 
 def create_buffer_tensor(buffer_size_bytes: int, name: str) -> torch.Tensor:
@@ -59,6 +61,7 @@ def run_mooncake_benchmark():
     logger.info("Starting MooncakeDistributedStore direct benchmark")
     logger.info(f"Buffer size: {BUFFER_SIZE_GB} GB")
     logger.info(f"Slice size: {SLICE_SIZE_BYTES / (1024 * 1024):.2f} MB")
+    logger.info(f"Chunk size: {CHUNK_SIZE_MB} MB")
 
     try:
         # Import MooncakeDistributedStore directly
@@ -167,19 +170,43 @@ def run_mooncake_benchmark():
             put_ptrs.append(slice_ptr)
             put_sizes.append(SLICE_SIZE_BYTES)
 
-        # Perform batch put operation
-        logger.info("Starting batch put operation...")
+        # Perform batch put operation in chunks
+        logger.info(f"Starting batch put operation in {CHUNK_SIZE_MB}MB chunks...")
         put_start_time = time.time()
 
-        result = store.batch_put_from(keys, put_ptrs, put_sizes)
+        # Calculate number of slices per chunk
+        slices_per_chunk = CHUNK_SIZE_BYTES // SLICE_SIZE_BYTES
+        total_chunks = (
+            total_slices + slices_per_chunk - 1
+        ) // slices_per_chunk  # Ceiling division
+
+        logger.info(
+            f"Processing {total_slices} slices in {total_chunks} chunks of {slices_per_chunk} slices each"
+        )
+
+        for chunk_idx in range(total_chunks):
+            start_slice = chunk_idx * slices_per_chunk
+            end_slice = min(start_slice + slices_per_chunk, total_slices)
+
+            chunk_keys = keys[start_slice:end_slice]
+            chunk_ptrs = put_ptrs[start_slice:end_slice]
+            chunk_sizes = put_sizes[start_slice:end_slice]
+
+            logger.info(
+                f"Processing chunk {chunk_idx + 1}/{total_chunks} (slices {start_slice}-{end_slice-1})"
+            )
+
+            chunk_result = store.batch_put_from(chunk_keys, chunk_ptrs, chunk_sizes)
+
+            # Check if chunk operation succeeded
+            if not all(r == 0 for r in chunk_result):
+                logger.error(
+                    f"Batch put failed for chunk {chunk_idx}, result: {chunk_result}"
+                )
+                return False
 
         put_time = time.time() - put_start_time
         logger.info(f"Batch put operation completed in {put_time:.4f} seconds")
-
-        # Check if all operations succeeded (result should be list of 0s for success)
-        if not all(r == 0 for r in result):
-            logger.error(f"Batch put failed, result: {result}")
-            return False
 
         # Verify data exists
         logger.info("Verifying data exists...")
@@ -205,38 +232,75 @@ def run_mooncake_benchmark():
             get_ptrs.append(slice_ptr)
             get_sizes.append(SLICE_SIZE_BYTES)
 
-        # Perform batch get operation
-        logger.info("Starting batch get operation...")
+        # Perform batch get operation in chunks
+        logger.info(f"Starting batch get operation in {CHUNK_SIZE_MB}MB chunks...")
         get_start_time = time.time()
 
-        result = store.batch_get_into(keys, get_ptrs, get_sizes)
+        for chunk_idx in range(total_chunks):
+            start_slice = chunk_idx * slices_per_chunk
+            end_slice = min(start_slice + slices_per_chunk, total_slices)
+
+            chunk_keys = keys[start_slice:end_slice]
+            chunk_ptrs = get_ptrs[start_slice:end_slice]
+            chunk_sizes = get_sizes[start_slice:end_slice]
+
+            logger.info(
+                f"Processing chunk {chunk_idx + 1}/{total_chunks} (slices {start_slice}-{end_slice-1})"
+            )
+
+            chunk_result = store.batch_get_into(chunk_keys, chunk_ptrs, chunk_sizes)
+
+            # Check if chunk operation succeeded
+            if not all(r >= 0 for r in chunk_result):
+                logger.error(
+                    f"Batch get failed for chunk {chunk_idx}, result: {chunk_result}"
+                )
+                return False
 
         get_time = time.time() - get_start_time
         logger.info(f"Batch get operation completed in {get_time:.4f} seconds")
 
-        # Check if all operations succeeded (result should be list of 0s for success)
-        if not all(r >= 0 for r in result):
-            logger.error(f"Batch get failed, result: {result}")
-            return False
-
         # Verify data integrity by comparing all slices
         logger.info("Verifying data integrity...")
         integrity_verified = True
+        max_diff = 0.0
+        total_diff_count = 0
+
         for i in range(total_slices):
             slice_start = i * slice_elements
             slice_end = slice_start + slice_elements
             put_slice = put_buffer[slice_start:slice_end]
             get_slice = get_buffer[slice_start:slice_end]
 
-            if not torch.allclose(put_slice, get_slice, atol=1e-6):
-                logger.error(f"❌ Data integrity check failed for slice {i}")
+            # Compare this slice using element-wise operations
+            slice_diff = torch.abs(put_slice - get_slice)
+            slice_max_diff = torch.max(slice_diff).item()
+
+            if (
+                slice_max_diff > 1e-6
+            ):  # Check if any element differs by more than tolerance
                 integrity_verified = False
+                slice_diff_count = torch.count_nonzero(slice_diff).item()
+
+                max_diff = max(max_diff, slice_max_diff)
+                total_diff_count += slice_diff_count
+
+                logger.error(f"❌ Data integrity check failed for slice {i}")
+                logger.error(f"Slice max difference: {slice_max_diff:.6f}")
+                logger.error(f"Slice non-zero differences: {slice_diff_count}")
                 break
+            elif i < 10:  # Log first 10 slices for debugging
+                slice_diff_count = torch.count_nonzero(slice_diff).item()
+                logger.info(
+                    f"Slice {i}: max difference: {slice_max_diff:.6f}, non-zero differences: {slice_diff_count}"
+                )
 
         if integrity_verified:
             logger.info("✅ Data integrity verified - all slice data matches exactly")
         else:
             logger.error("❌ Data integrity check failed")
+            logger.error(f"Overall max difference: {max_diff:.6f}")
+            logger.error(f"Total non-zero differences: {total_diff_count}")
             return False
 
         # Calculate performance metrics
@@ -252,6 +316,8 @@ def run_mooncake_benchmark():
         logger.info(f"Total data size: {total_data_size_mb:.2f} MB")
         logger.info(f"Number of slices: {total_slices}")
         logger.info(f"Slice size: {SLICE_SIZE_BYTES / (1024 * 1024):.2f} MB")
+        logger.info(f"Chunk size: {CHUNK_SIZE_MB} MB")
+        logger.info(f"Number of chunks: {total_chunks}")
         logger.info(f"Batch put time: {put_time:.4f} seconds")
         logger.info(f"Batch get time: {get_time:.4f} seconds")
         logger.info(f"Data verification time: {exists_time:.4f} seconds")

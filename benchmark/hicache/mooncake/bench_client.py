@@ -27,14 +27,14 @@ def create_4gb_buffer_tensor() -> torch.Tensor:
     # 4GB = 4 * 1024 * 1024 * 1024 bytes
     # For float32, each element is 4 bytes, so we need 1024 * 1024 * 1024 elements
     num_elements = 1024 * 1024 * 1024  # 4GB / 4 bytes per float32
-    tensor = torch.zeros(num_elements, dtype=torch.float32)
+    tensor = torch.zeros(num_elements, dtype=torch.float32, device="cpu")
 
     # Move to GPU if available
-    if torch.cuda.is_available():
-        tensor = tensor.cuda()
-        logger.info(f"Created 4GB buffer tensor on GPU: {tensor.device}")
-    else:
-        logger.info("Created 4GB buffer tensor on CPU")
+    # if torch.cuda.is_available():
+    # tensor = tensor.cuda()
+    # logger.info(f"Created 4GB buffer tensor on GPU: {tensor.device}")
+    # else:
+    #    logger.info("Created 4GB buffer tensor on CPU")
 
     return tensor
 
@@ -88,6 +88,7 @@ def run_benchmark_with_slice_size(
     # Fill set buffer with random data
     logger.info("Filling set buffer with random data...")
     set_buffer_tensor.random_()
+    torch.cuda.synchronize()
     logger.info("Set buffer filled with random data")
 
     # Generate unique keys for all slices
