@@ -647,15 +647,24 @@ class HiCacheController:
 
     # zero copy
     def _mooncake_page_get(self, operation, hash_values, host_indices):
+        print(
+            f"\t\tmooncake_page_get start: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        )
         key_strs, buffer_ptrs, buffer_sizes = self.mem_pool_host.get_buffer_meta(
             hash_values,
             host_indices,
             self.storage_config.tp_rank,
         )
+        print(
+            f"\t\tmooncake_page_get get_buffer_meta: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        )
         get_result = self.storage_backend.batch_get(
             key_strs,
             target_location=buffer_ptrs,
             target_sizes=buffer_sizes,
+        )
+        print(
+            f"\t\tmooncake_page_get batch_get: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
         )
         if get_result != len(hash_values):
             logger.warning(
@@ -663,6 +672,9 @@ class HiCacheController:
             )
         if get_result != 0:
             operation.increment(get_result * self.page_size)
+        print(
+            f"\t\tmooncake_page_get after increment: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        )
 
     # non-zero copy
     def _generic_page_get(self, operation, hash_values, host_indices):
@@ -701,15 +713,27 @@ class HiCacheController:
             get_func = self._generic_page_get
             batch_size = 8
 
+        print(
+            f"\tpage_transfer start: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        )
         # Transfer batch by batch
         for i in range(0, len(operation.hash_value), batch_size):
             batch_hashes = operation.hash_value[i : i + batch_size]
+            print(
+                f"\tpage_transfer hash_value: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+            )
             batch_host_indices = operation.host_indices[
                 i * self.page_size : (i + len(batch_hashes)) * self.page_size
             ]
+            print(
+                f"\tpage_transfer batch_host_indices: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+            )
             prev_completed_tokens = operation.completed_tokens
             # Get one batch token, and update the completed_tokens if succeed
             get_func(operation, batch_hashes, batch_host_indices)
+            print(
+                f"\tpage_transfer get_func: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+            )
             # Check termination
             if (
                 operation.completed_tokens
@@ -717,7 +741,13 @@ class HiCacheController:
             ):
                 break  # Some operations fail or operation terminated by controller
         # release pre-allocated memory
+        print(
+            f"\tpage_transfer before free: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        )
         self.mem_pool_host.free(operation.host_indices[operation.completed_tokens :])
+        print(
+            f"\tpage_transfer after free: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        )
 
     def is_mooncake_backend(self):
         return self.storage_backend_type == "mooncake"
@@ -729,7 +759,13 @@ class HiCacheController:
         while not self.stop_event.is_set():
             try:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
+                print(
+                    f"\tprefetch_io_aux_func before transfer: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+                )
                 self._page_transfer(operation)
+                print(
+                    f"\tprefetch_io_aux_func after transfer: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+                )
 
                 if self.tp_world_size > 1:
                     # to ensure all TP workers release the host memory at the same time
@@ -793,6 +829,9 @@ class HiCacheController:
                     hash_value, storage_hit_count = self._generic_storage_hit_query(
                         operation
                     )
+                print(
+                    f"\tstorage_hit_count: {storage_hit_count}, time: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+                )
 
                 if self.tp_world_size > 1:
                     storage_hit_count_tensor = torch.tensor(

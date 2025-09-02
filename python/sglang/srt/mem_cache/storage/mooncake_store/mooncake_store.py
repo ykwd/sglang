@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -214,14 +215,23 @@ class MooncakeStore(HiCacheStorage):
         assert len(keys) == len(target_location) == len(target_sizes)
         if len(keys) == 0:
             return 0
+        start_time = time.monotonic()
         get_result = self._get_batch_zero_copy_impl(keys, target_location, target_sizes)
+        end_time = time.monotonic()
+        print(
+            f"Batch get: time={end_time - start_time:.6f} sec, keys={len(keys)}, size={sum(target_sizes) / 2**20} MB, throughput={sum(target_sizes) / 2**20 / (end_time - start_time):.6f} MB/s"
+        )
         if self.is_mla_backend:
             key_multiplier = 1
         else:
             key_multiplier = 2
         for i in range(len(keys)):
             if get_result[i] < 0:
+                print(
+                    f"Batch get after loop: time={time.monotonic() - start_time:.6f} sec, i={i}"
+                )
                 return i // key_multiplier
+        print(f"Batch get after loop: time={time.monotonic() - start_time:.6f} sec")
         return len(keys) // key_multiplier
 
     def exists(self, key) -> bool:
