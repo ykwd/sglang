@@ -250,26 +250,21 @@ class HiCacheController:
         self.write_policy = write_policy
         self.page_size = page_size
         self.io_backend = io_backend
-
         self.enable_storage = False
 
-        # todo: move backend initialization to storage backend module
         if storage_backend is not None:
             self.storage_backend_type = storage_backend
             from sglang.srt.mem_cache.hicache_storage import get_hash_str
 
             self.get_hash_str = get_hash_str
-
             self.storage_config = self._generate_storage_config(
                 model_name, storage_backend_extra_config
             )
-            # In MLA backend, only one rank needs to backup the KV cache
+            # for MLA models, only one rank needs to backup the KV cache
             self.backup_skip = (
                 self.storage_config.is_mla_model
-                # todo: for load balancing, decide which rank to backup the KV cache by hash value
+                # todo: load balancing
                 and self.storage_config.tp_rank != 0
-                # todo: support other storage backends
-                and self.storage_backend_type in ["file", "mooncake"]
             )
 
             if storage_backend == "file":
@@ -309,12 +304,15 @@ class HiCacheController:
                 raise NotImplementedError(
                     f"Unsupported storage backend: {storage_backend}"
                 )
+
             self.enable_storage = True
             # todo: threshold policy for prefetching
             self.prefetch_threshold = max(prefetch_threshold, self.page_size)
             self.prefetch_capacity_limit = int(
                 0.8 * (self.mem_pool_host.size - self.mem_pool_device.size)
             )
+            # granularity of batch storage IO operations, in number of pages
+            self.storage_batch_size = 128
             # tracking the number of tokens locked in prefetching, updated by the main scheduler thread
             self.prefetch_tokens_occupied = 0
 
@@ -323,12 +321,6 @@ class HiCacheController:
             if self.tp_world_size > 1:
                 group_ranks = torch.distributed.get_process_group_ranks(tp_group)
                 self.prefetch_tp_group = torch.distributed.new_group(
-                    group_ranks, backend="gloo"
-                )
-                self.prefetch_io_tp_group = torch.distributed.new_group(
-                    group_ranks, backend="gloo"
-                )
-                self.backup_tp_group = torch.distributed.new_group(
                     group_ranks, backend="gloo"
                 )
 
@@ -380,6 +372,7 @@ class HiCacheController:
 
             self.prefetch_revoke_queue = Queue()
             self.ack_backup_queue = Queue()
+            self.host_mem_release_queue = Queue()
 
             self.prefetch_thread.start()
             self.backup_thread.start()
@@ -414,6 +407,7 @@ class HiCacheController:
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             is_mla_model=is_mla_backend,
+            is_page_first_layout=self.mem_pool_host.layout == "page_first",
             model_name=model_name,
             extra_config=extra_config,
         )
@@ -632,7 +626,11 @@ class HiCacheController:
             operation.prefetch_end_time - operation.prefetch_start_time,
         )
 
-    # zero copy
+    def append_host_mem_release(self, host_indices: torch.Tensor):
+        chunks = host_indices.split(self.mem_pool_host.page_size)
+        for chunk in chunks:
+            self.host_mem_release_queue.put(chunk)
+
     def _3fs_zero_copy_page_get(self, operation, hash_values, host_indices):
         hashes, dsts = self.mem_pool_host.get_buffer_with_hash(
             hash_values, host_indices
@@ -645,7 +643,6 @@ class HiCacheController:
                 f"Prefetch operation {operation.request_id} failed to retrieve page {hashes}."
             )
 
-    # zero copy
     def _mooncake_page_get(self, operation, hash_values, host_indices):
         print(
             f"\t\tmooncake_page_get start: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
@@ -676,12 +673,10 @@ class HiCacheController:
             f"\t\tmooncake_page_get after increment: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
         )
 
-    # non-zero copy
     def _generic_page_get(self, operation, hash_values, host_indices):
-        # todo: zero copy
-        dummy_page_dst = [self.mem_pool_host.get_dummy_flat_data_page()] * len(
-            hash_values
-        )
+        dummy_page_dst = [
+            self.mem_pool_host.get_dummy_flat_data_page() for _ in hash_values
+        ]
         page_data = self.storage_backend.batch_get(hash_values, dummy_page_dst)
         if page_data is None:
             return
@@ -691,6 +686,8 @@ class HiCacheController:
                     f"Prefetch operation {operation.request_id} failed to retrieve page {hash_values[i]}."
                 )
                 break
+            # Must set the data before increasing the completed tokens.
+            # Otherwise this page may be read before being set.
             self.mem_pool_host.set_from_flat_data_page(
                 host_indices[i * self.page_size],
                 page_data[i],
@@ -700,28 +697,22 @@ class HiCacheController:
 
     def _page_transfer(self, operation):
         # Select the get function and batch size
-        if self.is_mooncake_backend():
+        if self.storage_backend_type == "mooncake":
             get_func = self._mooncake_page_get
-            batch_size = 128
-        elif self.storage_backend_type == "hf3fs":
-            if self.mem_pool_host.layout == "page_first":
-                get_func = self._3fs_zero_copy_page_get
-            elif self.mem_pool_host.layout == "layer_first":
-                get_func = self._generic_page_get
-            batch_size = 128
+        elif (
+            self.storage_backend_type == "hf3fs"
+            and self.mem_pool_host.layout == "page_first"
+        ):
+            get_func = self._3fs_zero_copy_page_get
         else:
             get_func = self._generic_page_get
-            batch_size = 8
 
         print(
             f"\tpage_transfer start: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
         )
         # Transfer batch by batch
-        for i in range(0, len(operation.hash_value), batch_size):
-            batch_hashes = operation.hash_value[i : i + batch_size]
-            print(
-                f"\tpage_transfer hash_value: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
-            )
+        for i in range(0, len(operation.hash_value), self.storage_batch_size):
+            batch_hashes = operation.hash_value[i : i + self.storage_batch_size]
             batch_host_indices = operation.host_indices[
                 i * self.page_size : (i + len(batch_hashes)) * self.page_size
             ]
@@ -741,16 +732,9 @@ class HiCacheController:
             ):
                 break  # Some operations fail or operation terminated by controller
         # release pre-allocated memory
-        print(
-            f"\tpage_transfer before free: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
+        self.append_host_mem_release(
+            operation.host_indices[operation.completed_tokens :]
         )
-        self.mem_pool_host.free(operation.host_indices[operation.completed_tokens :])
-        print(
-            f"\tpage_transfer after free: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
-        )
-
-    def is_mooncake_backend(self):
-        return self.storage_backend_type == "mooncake"
 
     def prefetch_io_aux_func(self):
         """
@@ -766,48 +750,50 @@ class HiCacheController:
                 print(
                     f"\tprefetch_io_aux_func after transfer: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
                 )
-
-                if self.tp_world_size > 1:
-                    # to ensure all TP workers release the host memory at the same time
-                    torch.distributed.barrier(group=self.prefetch_io_tp_group)
                 # operation terminated by controller, release pre-allocated memory
-                self.mem_pool_host.free(
+                self.append_host_mem_release(
                     operation.host_indices[operation.completed_tokens :]
                 )
                 operation.prefetch_end_time = time.monotonic()
             except Empty:
                 continue
 
-    def prefetch_rate_limit_check(self) -> bool:
+    def prefetch_rate_limited(self) -> bool:
         """
         Rate limit the prefetching operations to avoid overwhelming the storage backend.
         """
         # cancel prefetch if too much memory is occupied
         if self.prefetch_tokens_occupied >= self.prefetch_capacity_limit:
-            return False
+            return True
         # todo: more sophisticated rate limiting based on storage backend performance
-        return True
+        return False
 
-    def _generic_storage_hit_query(self, operation) -> tuple[list[str], int]:
+    def _storage_hit_query(self, operation) -> tuple[list[str], int]:
         last_hash = operation.last_hash
         tokens_to_fetch = operation.token_ids
 
         storage_query_count = 0
-        remaining_tokens = len(tokens_to_fetch)
         hash_value = []
-        while remaining_tokens >= self.page_size:
-            last_hash = self.get_hash_str(
-                tokens_to_fetch[
-                    storage_query_count : storage_query_count + self.page_size
-                ],
-                last_hash,
+
+        for start in range(
+            0, len(tokens_to_fetch), self.page_size * self.storage_batch_size
+        ):
+            end = min(
+                start + self.page_size * self.storage_batch_size, len(tokens_to_fetch)
             )
-            hash_value.append(last_hash)
-            storage_query_count += self.page_size
-            remaining_tokens -= self.page_size
-        # deferring to batch exists
-        hit_page_num = self.storage_backend.batch_exists(hash_value)
-        return hash_value[:hit_page_num], hit_page_num * self.page_size
+            batch_tokens = tokens_to_fetch[start:end]
+            batch_hashes = []
+            for i in range(0, len(batch_tokens), self.page_size):
+                last_hash = self.get_hash_str(
+                    batch_tokens[i : i + self.page_size], last_hash
+                )
+                batch_hashes.append(last_hash)
+            hit_page_num = self.storage_backend.batch_exists(batch_hashes)
+            hash_value.extend(batch_hashes[:hit_page_num])
+            storage_query_count += hit_page_num * self.page_size
+            if hit_page_num < len(batch_hashes):
+                break
+        return hash_value, storage_query_count
 
     def prefetch_thread_func(self):
         """
@@ -823,16 +809,10 @@ class HiCacheController:
                     continue
                 operation.prefetch_start_time = time.monotonic()
 
-                if (
-                    operation.host_indices is not None
-                ) and self.prefetch_rate_limit_check():
-                    hash_value, storage_hit_count = self._generic_storage_hit_query(
-                        operation
-                    )
+                hash_value, storage_hit_count = self._storage_hit_query(operation)
                 print(
                     f"\tstorage_hit_count: {storage_hit_count}, time: {time.monotonic() - operation.prefetch_start_time:.6f} sec"
                 )
-
                 if self.tp_world_size > 1:
                     storage_hit_count_tensor = torch.tensor(
                         storage_hit_count, dtype=torch.int
@@ -847,8 +827,7 @@ class HiCacheController:
                 if storage_hit_count < self.prefetch_threshold:
                     # not to prefetch if not enough benefits
                     self.prefetch_revoke_queue.put(operation.request_id)
-                    if operation.host_indices is not None:
-                        self.mem_pool_host.free(operation.host_indices)
+                    self.append_host_mem_release(operation.host_indices)
                     logger.debug(
                         f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
                     )
@@ -860,7 +839,9 @@ class HiCacheController:
                         : (storage_hit_count // self.page_size)
                     ]
                     # free the pre-allocated memory for pages that are not hit
-                    self.mem_pool_host.free(operation.host_indices[storage_hit_count:])
+                    self.append_host_mem_release(
+                        operation.host_indices[storage_hit_count:]
+                    )
                     operation.host_indices = operation.host_indices[:storage_hit_count]
                     logger.debug(
                         f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
@@ -915,21 +896,18 @@ class HiCacheController:
     # Backup batch by batch
     def _page_backup(self, operation):
         # Select the set function and batch size
-        if self.is_mooncake_backend():
+        if self.storage_backend_type == "mooncake":
             backup_set_func = self._mooncake_page_set
-            batch_size = 128
-        elif self.storage_backend_type == "hf3fs":
-            if self.mem_pool_host.layout == "page_first":
-                backup_set_func = self._3fs_zero_copy_page_set
-            elif self.mem_pool_host.layout == "layer_first":
-                backup_set_func = self._generic_page_set
-            batch_size = 128
+        elif (
+            self.storage_backend_type == "hf3fs"
+            and self.mem_pool_host.layout == "page_first"
+        ):
+            backup_set_func = self._3fs_zero_copy_page_set
         else:
             backup_set_func = self._generic_page_set
-            batch_size = 8
         # Backup batch by batch
-        for i in range(0, len(operation.hash_value), batch_size):
-            batch_hashes = operation.hash_value[i : i + batch_size]
+        for i in range(0, len(operation.hash_value), self.storage_batch_size):
+            batch_hashes = operation.hash_value[i : i + self.storage_batch_size]
             batch_host_indices = operation.host_indices[
                 i * self.page_size : (i + len(batch_hashes)) * self.page_size
             ]
@@ -955,27 +933,7 @@ class HiCacheController:
 
                 if not self.backup_skip:
                     self._page_backup(operation)
-                    min_completed_tokens = operation.completed_tokens
-                else:
-                    min_completed_tokens = len(operation.token_ids)
-
-                if self.tp_world_size > 1:
-                    completed_tokens_tensor = torch.tensor(
-                        min_completed_tokens, dtype=torch.int
-                    )
-                    torch.distributed.all_reduce(
-                        completed_tokens_tensor,
-                        op=torch.distributed.ReduceOp.MIN,
-                        group=self.backup_tp_group,
-                    )
-                    min_completed_tokens = completed_tokens_tensor.item()
-
-                self.ack_backup_queue.put(
-                    (
-                        operation.id,
-                        min_completed_tokens,
-                    )
-                )
+                self.ack_backup_queue.put(operation.id)
 
             except Empty:
                 continue
