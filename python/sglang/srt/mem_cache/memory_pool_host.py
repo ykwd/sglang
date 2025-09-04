@@ -472,9 +472,6 @@ class MHATokenToKVPoolHost(HostKVCache):
             raise ValueError(f"Unsupported layout: {self.layout}")
 
     def get_buffer_meta(self, keys, indices, local_rank):
-        print(f"\t\t\tget_buffer_meta keys: {get_type_and_device(keys)}")
-        print(f"\t\t\tget_buffer_meta indices: {get_type_and_device(indices)}")
-
         ptr_list = []
         key_list = []
         kv_buffer_data_ptr = self.kv_buffer.data_ptr()
