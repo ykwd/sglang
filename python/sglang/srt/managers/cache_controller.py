@@ -895,6 +895,7 @@ class HiCacheController:
 
     # Backup batch by batch
     def _page_backup(self, operation):
+        start_time = time.monotonic()
         # Select the set function and batch size
         if self.storage_backend_type == "mooncake":
             backup_set_func = self._mooncake_page_set
@@ -920,6 +921,9 @@ class HiCacheController:
                 )
                 break
             operation.completed_tokens += self.page_size * len(batch_hashes)
+        print(
+            f"\tpage_backup time: {time.monotonic() - start_time:.6f} sec, completed_tokens: {operation.completed_tokens}"
+        )
 
     def backup_thread_func(self):
         """

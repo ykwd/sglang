@@ -171,7 +171,7 @@ class MooncakeStore(HiCacheStorage):
         for i in range(len(keys)):
             if keys[i] is None or target_location[i] is None or target_sizes[i] is None:
                 return False
-
+        start_time = time.monotonic()
         exist_result = self._batch_exist(keys)
         set_keys = []
         set_target_locations = []
@@ -197,6 +197,9 @@ class MooncakeStore(HiCacheStorage):
                 break
             success_count += 1
         # TODO: return the number of consecutive successful operations from the start.
+        print(
+            f"Batch set: time={time.monotonic() - start_time:.6f} sec, keys={len(keys)}, size={sum(target_sizes) / 2**20} MB, throughput={sum(target_sizes) / 2**20 / (time.monotonic() - start_time):.6f} MB/s"
+        )
         return success_count == len(keys)
 
     def get(

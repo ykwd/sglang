@@ -345,6 +345,7 @@ class WorkloadGenerator:
     def request_sender(self):
         async def request_loop():
             current_round = 0
+            print(f"Start round {current_round + 1}.")
             while True:
                 if self.sent_requests - self.completed_requests < self.max_parallel:
                     new_request = self.ready_queue.pop()
@@ -353,7 +354,7 @@ class WorkloadGenerator:
                         if this_round != current_round:
                             current_round = this_round
                             await asyncio.sleep(3)
-                            print(f"Start round {current_round}.")
+                            print(f"Start round {current_round + 1}.")
                         asyncio.create_task(self.handle_request(new_request))
                         self.sent_requests += 1
                 else:
