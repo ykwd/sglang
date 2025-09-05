@@ -198,7 +198,11 @@ class MooncakeStore(HiCacheStorage):
             success_count += 1
         # TODO: return the number of consecutive successful operations from the start.
         print(
-            f"Batch set: time={time.monotonic() - start_time:.6f} sec, keys={len(keys)}, size={sum(target_sizes) / 2**20} MB, throughput={sum(target_sizes) / 2**20 / (time.monotonic() - start_time):.6f} MB/s"
+            f"Batch set: time={time.monotonic() - start_time:.6f} sec, "
+            f"keys={len(keys)}, "
+            f"size={sum(target_sizes) / 2**20} MB, "
+            f"throughput={sum(target_sizes) / 2**20 / (time.monotonic() - start_time):.6f} MB/s, "
+            f"success_count={success_count}/{len(keys)}"
         )
         return success_count == len(keys)
 
@@ -232,7 +236,7 @@ class MooncakeStore(HiCacheStorage):
         for i in range(len(keys)):
             if get_result[i] < 0:
                 print(
-                    f"Batch get after loop: time={time.monotonic() - start_time:.6f} sec, i={i}"
+                    f"Batch get after loop: time={time.monotonic() - start_time:.6f} sec, partial success={i}/{len(keys)}"
                 )
                 return i // key_multiplier
         print(f"Batch get after loop: time={time.monotonic() - start_time:.6f} sec")

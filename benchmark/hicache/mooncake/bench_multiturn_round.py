@@ -327,10 +327,14 @@ class WorkloadGenerator:
         # Add round-based TTFT tracking
         self.round_ttft = {i: [] for i in range(args.num_rounds)}
 
+        # Add round-based item tracking (similar to vector<vector<item>> in C++)
+        self.round_items = [[] for _ in range(args.num_rounds)]
+
         # Store other necessary attributes
         self.num_rounds = args.num_rounds
         self.max_parallel = args.max_parallel
         self.output_length = args.output_length
+        self.num_clients = args.num_clients
 
     async def handle_request(self, item):
         try:
@@ -353,7 +357,6 @@ class WorkloadGenerator:
                         this_round = new_request[2]
                         if this_round != current_round:
                             current_round = this_round
-                            await asyncio.sleep(3)
                             print(f"Start round {current_round + 1}.")
                         asyncio.create_task(self.handle_request(new_request))
                         self.sent_requests += 1
@@ -383,6 +386,7 @@ class WorkloadGenerator:
         loop.close()
 
     def response_handler(self):
+        global_current_round = 0
         while True:
             try:
                 client_id, response, current_round = self.response_queue.get(
@@ -406,16 +410,22 @@ class WorkloadGenerator:
                     self.client_records[client_id][
                         "history"
                     ] += self.sub_question_inputs.pop().prompt
-                    self.ready_queue.append(
-                        (
-                            client_id,
-                            gen_payload(
-                                self.client_records[client_id]["history"],
-                                self.output_length,
-                            ),
-                            self.client_records[client_id]["round"],
-                        )
+                    new_item = (
+                        client_id,
+                        gen_payload(
+                            self.client_records[client_id]["history"],
+                            self.output_length,
+                        ),
+                        self.client_records[client_id]["round"],
                     )
+                    # Also append to round_items data structure
+                    self.round_items[current_round].append(new_item)
+                if len(self.round_items[global_current_round]) == self.num_clients:
+                    print(f"Finish round {global_current_round + 1}.")
+                    time.sleep(3)
+                    for item in self.round_items[global_current_round]:
+                        self.ready_queue.append(item)
+                    global_current_round += 1
             except queue.Empty:
                 if self.pbar.n == self.pbar.total:
                     break
@@ -522,6 +532,17 @@ class WorkloadGenerator:
                 print(f"  Round {round_num}: No requests completed")
 
         return performance_data
+
+    def get_round_items(self, round_num):
+        """Get all items for a specific round."""
+        if 0 <= round_num < self.num_rounds:
+            return self.round_items[round_num]
+        else:
+            return []
+
+    def get_all_round_items(self):
+        """Get all round items as a list of lists."""
+        return self.round_items
 
 
 if __name__ == "__main__":
