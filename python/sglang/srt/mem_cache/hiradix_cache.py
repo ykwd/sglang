@@ -75,7 +75,7 @@ class HiRadixCache(RadixCache):
         self.enable_storage = hicache_storage_backend is not None
         # todo: customizable storage prefetch threshold and timeout
         self.prefetch_threshold = 256
-        self.prefetch_timeout = 3  # seconds
+        self.prefetch_timeout = 1  # seconds
         self.prefetch_stop_policy = hicache_storage_prefetch_policy
         self.prefetch_completed_tokens = 0
 
@@ -448,6 +448,10 @@ class HiRadixCache(RadixCache):
             can_terminate = completed or (
                 time.monotonic() - operation.start_time > self.prefetch_timeout
             )
+            if time.monotonic() - operation.start_time > self.prefetch_timeout:
+                print(
+                    f"##### Prefetch operation {operation.request_id} timed out, time: {time.monotonic() - operation.start_time:.2f}, policy: {self.prefetch_stop_policy}"
+                )
         else:
             # unknown prefetch stop policy, just return True
             return True

@@ -404,6 +404,11 @@ class WorkloadGenerator:
                 # Record TTFT for the current round
                 self.round_ttft[current_round].append(response.ttft)
                 self.completed_requests += 1
+                if response.ttft > 3:
+                    print(
+                        f"TTFT is too long: {response.ttft} seconds, client_id: {client_id}, cached_tokens: {response.cached_tokens}, prompt_len: {response.prompt_len}"
+                    )
+                    exit()
 
                 if self.client_records[client_id]["round"] < self.num_rounds:
                     # append new request to client's history
