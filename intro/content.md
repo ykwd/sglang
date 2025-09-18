@@ -97,7 +97,7 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 ### 多Rank间的同步机制
 
-在多卡并行计算时，例如在多TP计算时，HiCache需要确保多个rank之间的状态一致性。因此，在计算的关键步骤均需要使用`all_reduce`来同步状态。例如，在prefetch时，首先需要使用`all_reduce(op=min)`来确保所有rank获得相同的L3命中数量，避免不同rank对于是否达到预取阈值有不同的判断，在完成或终止预取后，同样也需要使用`all_reduce(op=min)`确保所有rank对有kv cache缓存的前缀长度取得共识。
+在多卡并行计算时，例如在多TP计算时，HiCache需要确保多个rank之间的状态一致性。因此，在计算的关键步骤均需要使用`all_reduce`来同步状态。例如，在prefetch时，首先需要使用`all_reduce(op=min)`来确保所有rank获得相同的L3命中数量，避免不同rank对于是否达到预取阈值有不同的判断；在完成或终止预取后，同样也需要使用`all_reduce(op=min)`确保所有rank对已有kv cache缓存的前缀长度取得共识。
 
 ### 数据传输优化
 
@@ -108,14 +108,7 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 **数据的“整存整取”**：在我们的测试中发现，读写数据的粒度对性能的影响很大。如果每个token的每一层KV都是一个单独的对象，假设层数为61，一次性读写的token数量为2048，则会对应约12.5万个对象。大量的小对象会极大降低传输效率，增大L3的元数据管理负担。
 为此，HiCache L3采用Page为粒度存储和读写KV Cache。同时，对于KV Cache的数据组织方式，在已有的`layer first`的基础上，HiCache L2还支持`page first`。在使用`page first`的情况下，同一个Page的所有的KV Cache数据都放在连续的内存里，可以直接作为一个完整的对象通过零拷贝的方式传递给L3。如果Page Size等于64，则2048个token只对应了32个对象，对象数量相比于naive的方法减少了3904倍，相对的，每个对象的大小也增大了3904倍。
 ![Hicache L2 MEM layout](./resources/hicache_layout.png)
-
-
-
-**写回优化技术**：
-- **批量操作**：采用批量写回策略，将多个页面的数据一次性写入存储后端，提高I/O效率
-- **零拷贝传输**：对于支持的后端（如Mooncake、3FS），采用零拷贝机制直接传输内存指针，避免数据拷贝开销
-
-这些同步机制确保了在分布式环境下，HiCache能够维护正确的缓存状态，避免不同rank之间的不一致性，同时最小化同步开销对性能的影响。
+更进一步，Mooncake 支持高效的批量读写，并能够利用 RDMA 对一个 batch 的数据通过多个网卡并行地同多个远程节点进行数据传输。在 HiCache 中，目前经验性地将 batch size 的上限设置为 128 个 page，超过该值则会被拆分为多个 batch。这是一种权衡：一方面，通过批量并行传输可以提升 I/O 效率；另一方面，分批完成则能保证在 `best_effort` 或 `timeout` 设置触发终止时，至少已完成的 batch 数据能够被利用上。
 
 **MLA优化**
 
@@ -139,4 +132,3 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 ## 未来规划
 
 **多种不同的dp或tp配置共享数据**
-
