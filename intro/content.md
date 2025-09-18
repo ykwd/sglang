@@ -122,4 +122,6 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 **多种不同的dp或tp配置共享数据**
 
+**前缀感知的Eviction**
+
 注：文中的部分图片来自[SGLang Blog](https://lmsys.org/) 和 [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/)，非常感谢。
