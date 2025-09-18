@@ -110,25 +110,16 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 ![Hicache L2 MEM layout](./resources/hicache_layout.png)
 更进一步，Mooncake 支持高效的批量读写，并能够利用 RDMA 对一个 batch 的数据通过多个网卡并行地同多个远程节点进行数据传输。在 HiCache 中，目前经验性地将 batch size 的上限设置为 128 个 page，超过该值则会被拆分为多个 batch。这是一种权衡：一方面，通过批量并行传输可以提升 I/O 效率；另一方面，分批完成则能保证在 `best_effort` 或 `timeout` 设置触发终止时，至少已完成的 batch 数据能够被利用上。
 
-**MLA优化**
+**MLA的写回优化**：对于MHA（Multi-Head Attention）模型，在多TP时，每个rank持有一个token的`1/tp_size`的KV数据；而对于MLA（Multi-Layer Attention）模型，所有的rank都持有一个token完整的、相同的数据，这意味着多个rank存储着重复的数据。在最初的实现中，HiCache没有特判MLA，在写回L3时所有rank均会将本地数据传入L3（以前缀哈希+rank为索引），这导致MLA下所有数据都被写入和存储了多份。针对于此，HiCache对MLA加上了特判逻辑，保证只有一个rank会发起写回操作，数据也不会存储多份。
+
+**CPU与GPU间的传输优化**：在HiCache中，与从L3预取数据到L2类似，将数据从CPU移动到GPU的过程同样是性能关键。HiCache为此采用了多项优化：
+- 存算重叠：在Prefill阶段将CPU内存的数据传入GPU时，HiCache采用层间重叠机制，在第N层计算时，并发的加载第N+1层的KV cache，从而有效隐藏数据传输的延迟。
+- GPU-assisted I/O kernels：在`cudaMemcpyAsync`之上，HiCache开发了一套GPU辅助I/O内核，专门针对CPU-GPU之间的KV缓存数据传输进行了优化。相比前者实现了至多3倍的传输速度提升。具体实现细节可以参考[transfer.cu](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/csrc/kvcacheio/transfer.cu)。
 
 **Page First Direct**
-
-### 灵活的控制平面
-- 当GPU缓存未命中但CPU内存命中时，采用层间重叠机制，在层N执行时并发加载层N+1的KV缓存，有效隐藏数据传输延迟
-
-**优化的数据平面**：
-- 开发了GPU辅助I/O内核，相比标准`cudaMemcpyAsync`提供高达3倍的CPU-GPU传输吞吐量
-- 采用"页优先"布局优化CPU内存池，与GPU的"层优先"布局解耦，实现更大的单次传输大小
-
-### 1.2.4 性能表现
-
-根据社区反馈和基准测试结果，HiCache在多个场景下都取得了显著的性能提升：
-
-- **Novita AI**：在Qwen3-Coder-480B编码代理场景中，平均TTFT（Time To First Token）降低56%，推理吞吐量翻倍，缓存命中率从40%提升至80%
-- **Ant Group**：在DeepSeek-R1-671B模型的通用QA场景测试中，缓存命中相比完全重计算实现了84%的TTFT降低
-- **官方基准测试**：实现了高达6倍的吞吐量提升和80%的TTFT降低
 
 ## 未来规划
 
 **多种不同的dp或tp配置共享数据**
+
+注：文中的部分图片来自[SGLang Blog](https://lmsys.org/) 和 [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/)，非常感谢。
