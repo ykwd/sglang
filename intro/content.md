@@ -105,9 +105,10 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 - HiCache支持数据从L2内存到L3后端时，直接传入内存地址和大小；
 - Mooncake对上提供了零拷贝的读写接口，支持从L2到RMDA传输之间完全的零拷贝。预取的时候，可从远端内存通过RDMA直接将数据读入L2目标内存；写回时，可将L2的数据通过RDMA直接写入到远端的目标地址。从而实现了整个数据传输过程完全的零拷贝。
 
-**数据的“整存整取”**：
+**数据的“整存整取”**：在我们的测试中发现，读写数据的粒度对性能的影响很大。如果每个token的每一层KV都是一个单独的对象，假设层数为61，一次性读写的token数量为2048，则会对应约12.5万个对象。大量的小对象会极大降低传输效率，增大L3的元数据管理负担。
+为此，HiCache L3采用Page为粒度存储和读写KV Cache。同时，对于KV Cache的数据组织方式，在已有的`layer first`的基础上，HiCache L2还支持`page first`。在使用`page first`的情况下，同一个Page的所有的KV Cache数据都放在连续的内存里，可以直接作为一个完整的对象通过零拷贝的方式传递给L3。如果Page Size等于64，则2048个token只对应了32个对象，对象数量相比于naive的方法减少了3904倍，相对的，每个对象的大小也增大了3904倍。
+![Hicache L2 MEM layout](./resources/hicache_layout.png)
 
-写回操作支持批量处理，将多个页面的数据一次性写入存储后端，提高I/O效率。对于支持的后端（如Mooncake、3FS），系统采用零拷贝机制直接传输内存指针，避免数据拷贝开销。写回完成后，系统会通过`ack_backup_queue`通知主线程，释放相关资源并更新缓存状态。
 
 
 **写回优化技术**：
@@ -116,7 +117,9 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 这些同步机制确保了在分布式环境下，HiCache能够维护正确的缓存状态，避免不同rank之间的不一致性，同时最小化同步开销对性能的影响。
 
-### MLA优化
+**MLA优化**
+
+**Page First Direct**
 
 ### 灵活的控制平面
 - 当GPU缓存未命中但CPU内存命中时，采用层间重叠机制，在层N执行时并发加载层N+1的KV缓存，有效隐藏数据传输延迟
@@ -136,3 +139,4 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 ## 未来规划
 
 **多种不同的dp或tp配置共享数据**
+
