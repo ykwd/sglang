@@ -1,12 +1,12 @@
 # 当SGLang 遇上 Mooncake：KV Cache 的三重奏
 
-在大语言模型推理中，Prefill阶段需要将输入序列转化为Key-Value缓存（KV Cache）供后续解码使用。如果多个请求共享相同的前缀内容，那么这些前缀部分的KV Cache其实是完全一致的。通过将相同前缀的KV Cache缓存并复用，就可以避免重复计算。这样做的动机很直接：减少无效的算力浪费，降低延迟，并在并发场景下显著提升整体吞吐量。换句话说，**“一次计算，多次使用”** 让模型在处理相似输入时更高效、更省资源。因此，SGLang此前提出了RadixAttention，利用GPU中的闲置内存来缓存和重用相同前缀的KV Cache。
+在大语言模型推理中，Prefill 阶段往往是最耗时的：输入序列需要先被转化为 Key-Value 缓存（KV Cache），供后续解码使用。如果多个请求共享相同的前缀内容，那么这些前缀部分的 KV Cache 实际上完全一致。通过将相同前缀的 KV Cache 缓存并复用，就可以避免重复计算。这样做的好处非常直接：减少无效的算力浪费，降低延迟，并在并发场景下显著提升整体吞吐量。换句话说，**“一次计算，多次使用”** 让模型在处理相似输入时更高效、更节省资源。因此，SGLang此前提出了RadixAttention，充分利用GPU中的闲置内存来缓存和重用相同前缀的 KV Cache。
 
-然而，随着上下文长度增长和并发请求增加，KV Cache的容量瓶颈问题日益凸显：GPU内存容量是很有限的，但请求的上下文长度和SLO要求是无限的。于是，SGLang干脆把现代CPU的"三级缓存"这一经典设计搬到了大模型里。这就是 HiCache：GPU显存当L1，Host内存当L2，Mooncake、3FS、NIXL等分布式缓存当L3。思路简单粗暴，却效果惊艳——既缓解了KV Cache的容量焦虑，又把性能拉到了新高度。
+然而，随着上下文长度增长和并发请求增加，KV Cache的容量瓶颈问题日益凸显：GPU内存容量是很有限的，但请求的上下文长度和SLO要求是无限的。RadixAttention 解决了前缀复用问题，但没有解决容量瓶颈问题。于是，SGLang干脆把现代CPU的"三级缓存"这一经典设计搬到了大模型里。这就是 HiCache：GPU显存当L1，Host内存当L2，Mooncake、3FS、NIXL等分布式缓存当L3。设计思路直白，效果却十分惊艳——既缓解了KV Cache的容量焦虑，又把性能拉到了新高度。
 
 经过大家数月的努力，目前HiCache已经[成功发布啦](https://lmsys.org/blog/2024-01-17-sglang/)！我们很开心能在这里做一个HiCache相关的技术分享，抛砖引玉。下面我们会首先介绍SGLang HiCache的背景和整体架构，然后详细介绍HiCache的一些实现细节和遇到的挑战，最后介绍接下来会做的一些工作。
 
-**同时也欢迎大家来使用和贡献代码! HiCache+Mooncake的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。**
+**HiCache+Mooncake的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。欢迎大家来使用和贡献代码!我们期待更多开发者一起来打磨与拓展这个生态。**
 
 ## SGLang HiCache 简介
 
@@ -86,7 +86,7 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 用户可根据具体的系统配置、使用场景和性能需求选择最适合的写回策略。
 
-**多线程、异步的写回**：数据写回采用了多线程、异步计算的方式提高写回效率。写回操作以HiRadixTree中的一个节点中的KV Cache为单位，当该节点的KV Cache达到相应条件时，系统会触发写回操作。
+**异步、并行的写回**：数据写回采用了异步、并行的方式提高写回效率。写回操作以HiRadixTree中的一个节点中的KV Cache为单位，当该节点的KV Cache达到相应条件时，系统会触发写回操作。
 
 当数据从L1写回到L2时，会调用`write_backup`函数进行异步数据传输，避免阻塞主调度流程。
 
