@@ -88,9 +88,9 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 **多线程、异步的写回**：数据写回采用了多线程、异步计算的方式提高写回效率。写回操作以HiRadixTree中的一个节点中的KV Cache为单位，当该节点的KV Cache达到相应条件时，系统会触发写回操作。
 
-当数据从L1写回到L2时，会调用`write_backup`函数，使用GPU流进行异步数据传输，避免阻塞主调度流程。
+当数据从L1写回到L2时，会调用`write_backup`函数进行异步数据传输，避免阻塞主调度流程。
 
-当数据从L2写回到L3存储时，系统会调用`write_backup_storage`函数，将写回操作放入`backup_queue`中。专门的`backup_thread_func`线程会不断从队列中取出写回操作并调用L3后端执行数据传输。和预取类似，Mooncake可以通过RDMA，并行、高速地完成数据的传输。
+当数据从L2写回到L3存储时，系统会调用`write_backup_storage`函数，将写回操作放入`backup_queue`中。专门的`backup_thread_func`线程会不断从队列中取出写回操作并调用L3后端执行数据传输。和预取类似，Mooncake可以通过RDMA并行、高速地完成数据的传输。
 
 **跨实例共享**：在从L2写回到L3时，只有L3中尚未存在的数据会通过数据传输进行写回。写回到L3的KV Cache可被集群中所有SGLang实例共享，在相同的内存预算下显著提升了缓存命中率。
 
@@ -102,10 +102,11 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 **零数据拷贝**：不论在预取还是在写回阶段，都涉及到大量的数据传输工作。尽可能减少数据拷贝的次数可以显著提升系统性能：
 - HiCache支持数据从L2内存到L3后端时，直接传入内存地址和大小；
-- Mooncake对上提供了零拷贝的读写接口，支持从L2到RMDA传输之间完全的零拷贝。预取的时候，可从远端内存通过RDMA直接将数据读入L2目标内存；写回时，可将L2的数据通过RDMA直接写入到远端的目标地址。从而实现了整个数据传输过程完全的零拷贝。
+- Mooncake对上提供了零拷贝的读写接口，支持从L2到RDMA传输之间完全的零拷贝。预取的时候，可从远端内存通过RDMA直接将数据读入L2目标内存；写回时，可将L2的数据通过RDMA直接写入到远端的目标地址，从而实现了整个数据传输过程完全的零拷贝。
 
-**数据的“整存整取”**：在我们的测试中发现，读写数据的粒度对性能的影响很大。如果每个token的每一层KV都是一个单独的对象，假设层数为61，一次性读写的token数量为2048，则会对应约12.5万个对象。大量的小对象会极大降低传输效率，增大L3的元数据管理负担。
-为此，HiCache L3采用Page为粒度存储和读写KV Cache。同时，对于KV Cache的数据组织方式，在已有的`layer first`的基础上，HiCache L2还支持`page first`和`page first direct`的布局。在使用`page first`或`page first direct`的情况下，同一个Page的所有的KV Cache数据都放在连续的内存里，可以直接作为一个完整的对象通过零拷贝的方式传递给L3。如果page size等于64，则2048个token只对应了32个对象，对象数量相比于naive的方法减少了3904倍，相对的，每个对象的大小也增大了3904倍。
+**数据的“整存整取”**：在我们的测试中发现，读写数据的粒度对性能的影响很大。如果每个token的每一层KV都是一个单独的对象，假设层数为61，一次性读写的token数量为2048，则会对应约12.5万个对象。大量的小对象会极大降低传输效率，增大L3的元数据管理负担。为此，HiCache L3采用Page为粒度存储和读写KV Cache。如果page size等于64，则2048个token只对应了32个对象，对象数量相比于naive的方法减少了3904倍，相对的，每个对象的大小也增大了3904倍。
+
+同时，对于KV Cache的数据组织方式，在已有的`layer first`的基础上，HiCache L2还支持`page first`和`page first direct`的布局。在使用`page first`或`page first direct`的情况下，同一个page的所有KV Cache数据都放在连续的内存里，可以直接作为一个完整的对象通过零拷贝的方式传递给L3。
 ![HiCache L2 MEM layout](./resources/hicache_layout.png)
 
 但由于GPU中KV的计算是按层进行的，所以GPU中天然是`layer first`的。而将`page first`的L2数据传入`layer first`的GPU时，只能以一个token的一个layer为粒度传。`page first direct`则改善了这个问题，在此布局下，L2到GPU的传输可以将一个page的一个layer聚合到一起。
@@ -115,35 +116,23 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 **CPU与GPU间的传输优化**：在HiCache中，与从L3预取数据到L2类似，将数据从CPU移动到GPU的过程同样是性能关键。HiCache为此采用了多项优化：
 - 存算重叠：在Prefill阶段将CPU内存的数据传入GPU时，HiCache采用层间重叠机制，在第N层计算时，并发的加载第N+1层的KV cache，从而有效隐藏数据传输的延迟。
-- GPU-assisted I/O kernels：在`cudaMemcpyAsync`之上，HiCache开发了一套GPU辅助I/O内核，专门针对CPU-GPU之间的KV缓存数据传输进行了优化。相比前者实现了至多3倍的传输速度提升。具体实现细节可以参考[transfer.cu](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/csrc/kvcacheio/transfer.cu)。
+- GPU-assisted I/O kernels：在`cudaMemcpyAsync`之上，HiCache开发了一套GPU辅助I/O内核，专门针对CPU-GPU之间的KV Cache数据传输进行了优化。相比前者实现了至多3倍的传输速度提升。具体实现细节可以参考[transfer.cu](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/csrc/kvcacheio/transfer.cu)。
 
 **MLA的写回优化**：对于MHA（Multi-Head Attention）模型，在多TP时，每个rank持有一个token的`1/tp_size`的KV数据；而对于MLA（Multi-Layer Attention）模型，所有的rank都持有一个token完整的、相同的数据，这意味着多个rank存储着重复的数据。在最初的实现中，HiCache没有特判MLA，在写回L3时所有rank均会将本地数据传入L3（以前缀哈希+rank为索引），这导致MLA下所有数据都被写入和存储了多份。针对于此，HiCache对MLA加上了特判逻辑，保证只有一个rank会发起写回操作，数据也不会存储多份。
 
-**Page First Direct I/O内核**：目前GPU显存里采用的还除了GPU-assisted I/O kernels，HiCache还引入了Page First Direct I/O内核优化，这是针对数据布局和传输模式的进一步改进。通过[PR #10060](https://github.com/sgl-project/sglang/pull/10060/files#diff-22b9dcb6d433fe314251b21cdc2ef9653c24d90384edba9036a2904cdf09ae81)实现的Page First Direct布局，HiCache能够：
-
-1. **页优先数据布局**：采用页优先（Page First）的数据组织方式，将数据按照存储页面的访问模式进行排列，减少I/O操作时的页面碎片化，提高存储系统的访问效率。
-
-2. **直接I/O传输**：实现了`transfer_kv_per_layer_direct_pf_lf`和`transfer_kv_all_layer_direct_lf_pf`等直接传输内核，避免了传统传输过程中的中间拷贝步骤，实现零拷贝或近零拷贝的数据传输。
-
-3. **可配置的内存布局**：通过`--hicache-mem-layout`参数支持`page_first_direct`模式，用户可以根据具体的硬件环境和I/O模式选择最优的数据布局策略。
-
-4. **分层传输优化**：支持单层和全层的页优先传输，针对不同层级的KV cache数据采用相应的传输策略，最大化传输效率。
-
-这种Page First Direct优化特别适用于HiCache的L2到L3存储之间的数据传输场景，通过优化数据布局和传输路径，显著提升了大规模KV cache数据的I/O性能，为长上下文和多轮对话场景提供了更好的支持。
-
 ### 和PD分离部署模式的结合
 
-此前，SGLang已经支持通过Mooncake TransferEngine实现PD（Prefill-Decode）分离部署模式（相关资料参见[这个blog](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration-v1.html)）。这种架构将预填充和解码阶段分离到不同节点，P节点专门负责处理预填充阶段的计算，D节点专门负责解码阶段的计算。
+此前，SGLang已经支持通过Mooncake TransferEngine实现PD（Prefill-Decode）分离部署模式（相关资料参见[这个blog](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration-v1.html)）。这种架构将Prefill和Decode阶段分离到不同节点，P节点专门负责处理Prefill阶段的计算，D节点专门负责Decode阶段的计算。
 
-在PD分离部署模式下，可以在Prefill节点开启HiCache来优化预填充性能。通过HiCache的分层缓存机制，P节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。目前只需要部署一套Mooncake，即可体验到上述优化 ^_^
+在PD分离部署模式下，可以在Prefill节点开启HiCache来优化Prefill性能。通过HiCache的分层缓存机制，P节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。目前只需要部署一套Mooncake，即可完整体验到上述优化 ^_^
 
 ## 下一步工作讨论
 
-**不同TP Size的实例共享KV Cache**：在大规模部署中，特别是在异构环境中，集群内可能存在不同TP size的SGLang实例。当前的HiCache实现存在一个限制：当TP size大于1时，每个token的KV cache会被拆分到不同的rank中，每个rank只存储1/tp_size的数据。这意味着在L3存储中，同一个token的KV cache会以tp_size个不同的对象形式存储。
+**不同TP Size的实例共享KV Cache**：在大规模部署中，特别是在异构环境中，集群内可能存在不同TP size的SGLang实例。当前的HiCache实现存在一个限制：当TP size大于1时，每个token的KV Cache会被拆分到不同的rank中，每个rank只存储1/tp_size的数据。这意味着在L3存储中，同一个token的KV cache会以tp_size个不同的对象形式存储。
 
-这种设计导致了一个重要问题：即使不同TP size的实例处理相同的模型和相同的前缀，由于KV cache的拆分粒度不同，它们无法共享L3存储中的KV cache数据。例如，一个TP=2的实例和一个TP=4的实例处理相同的输入序列时，它们的KV cache在L3中存储为不同粒度的对象，无法实现跨实例的缓存共享。
+这种设计导致了一个重要问题：即使不同TP size的实例处理相同的模型和相同的前缀，由于KV Cache的拆分粒度不同，它们无法共享L3存储中的KV Cache数据。例如，一个TP=2的实例和一个TP=4的实例处理相同的输入序列时，它们的KV Cache在L3中存储为不同粒度的对象，无法实现跨实例的缓存共享。
 
-下一步我们会实现KV cache数据的动态重组，在零拷贝的前提下，实现不同TP size配置的KV Cache的数据共享。
+下一步我们会实现KV Cache数据的动态重组，在零拷贝的前提下，实现不同TP size配置的KV Cache的数据共享。
 
 **前缀感知的Eviction**：当前HiCache的eviction策略在不同层级采用了不同的策略。在L1和L2层级，系统会从HiRadixTree的叶子节点开始eviction，这种设计避免了在前缀上出现空洞，确保缓存的前缀完整性。然而，L3存储后端目前缺乏前缀信息，只能采用传统的LRU等算法进行对象级别的eviction，这可能导致重要的前缀数据被误删。但是，L3只从叶子删除也有缺陷，因为热点数据可能在L1和L2里已有保留，L3再重复存储也可能造成空间浪费。
 
