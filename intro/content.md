@@ -10,18 +10,23 @@
 
 ## SGLang HiCache 简介
 
-SGLang 是一个高性能的大语言模型推理服务框架，专为大规模部署和优化推理性能而设计。HiCache（Hierarchical KV Cache）是 SGLang 中引入的一项关键技术创新，旨在解决现有 KV Cache 系统面临的容量瓶颈问题。在长上下文和多轮对话场景中，现有的 RadixAttention 虽然能够有效复用 GPU 内存中的 KV Cache，但随着上下文长度增长和并发客户端增加，缓存命中率会显著下降，因为大部分旧的 KV Cache 必须被踢出去，为新数据腾出空间。
+SGLang 是一个高性能的大语言模型推理服务框架，专为大规模部署和推理优化而设计。HiCache（Hierarchical KV Cache）是其中一项核心技术创新，主要用于解决现有 KV Cache 在容量上的瓶颈问题。
 
-针对上述挑战，HiCache 应运而生。HiCache 通过引入 HiRadixTree 作为页表来引用位于本地 GPU 显存和 CPU 内存中的 KV Cache，并通过 Cache Controller 自动管理跨层级的 KV Cache 数据加载和备份，以及远程 KV Cache 的读取和写入，从而将 GPU、CPU、SSD 的"闲置"存储空间都利用起来，并依赖 Mooncake、3FS、NIXL 等分布式存储系统对全局的 KV Cache 进行存储和管理，在保障读取性能的同时大大提升了 KV Cache 的容量。
+在长上下文和多轮对话场景中，现有的 RadixAttention 虽然能够高效复用 GPU 显存中的 KV Cache，但随着上下文长度的增长和并发请求的增加，缓存命中率会迅速下降——因为大部分旧的 KV Cache 不得不被淘汰，为新数据腾出空间。
+
+为了解决这一挑战，HiCache 应运而生。它通过引入 HiRadixTree 作为页表，来统一引用 GPU 显存和 CPU 内存中的 KV Cache。同时，Cache Controller 负责自动管理跨层级的数据加载与回写，包括远程 KV Cache 的读取与写入。借助这一机制，HiCache 将 GPU、CPU、SSD 的“闲置”存储空间充分利用，并依赖 Mooncake、3FS、NIXL 等分布式存储系统来实现全局 KV Cache 的存储与调度。在保障读取性能的前提下，KV Cache 的可用容量得到了大幅提升。
 
 ![multiturn-per-turn](./resources/hicache_multi_turn_per_turn.png)
 
+上图展示了我们在 8 卡 H800 服务器上进行多轮对话测试的实验结果。其中 GPU only、+L2、+Mooncake 分别对应 KV Cache 仅包含 L1、包含 L1+L2、以及包含 L1+L2+Mooncake 的三种情况。结果清晰表明：缓存命中率对 prefill 性能有显著影响。
 
-上面这幅图展示了我们在 8 卡 H800 的服务器上测试多轮对话的实验结果。其中 GPU only, +L2, +Mooncake 分别表示 KV Cache 包含了 L1, L1+L2, L1+L2+Mooncake。可以看到 KV Cache 命中率对 prefill 性能有显著影响。当缓存命中时，TTFT 明显低于缓存未命中的情况。在前三轮对话中，+Mooncake 和 +L2 表现出相同的缓存命中率。在这个阶段，+L2 略快于 +Mooncake，因为它不需要从远程存储获取数据。然而，随着轮数增加，当 KV 缓存大小超过 +L2 的内存容量时，+L2 的命中率逐渐下降，导致 TTFT 显著增加。相比之下，Mooncake 保持了高命中率，其 TTFT 增长非常缓慢。
+* 当缓存命中时，TTFT（Time To First Token） 明显低于未命中情况。
+* 在前三轮对话中，+Mooncake 与 +L2 的命中率几乎相同，此时 +L2 的性能略优，因为它无需从远程存储获取数据。
+* 随着对话轮数增加，KV Cache 的大小逐渐超过 L2 的容量，导致 +L2 的命中率持续下降，TTFT 显著增加。相比之下，+Mooncake 保持了高命中率，其 TTFT 仅缓慢上升。
 
-在实际部署中，Mooncake 将整个集群的内存聚合成一个大型分布式内存池，从而能够缓存大量的 KV Cache。每个缓存的 KV 都可以被所有 SGLang 实例共享，这在相同的内存预算下显著提升了缓存命中率。因此，在大规模 SGLang 集群中，Mooncake 能够降低推理的延迟，并提升吞吐量。
+在实际部署中，Mooncake 会将整个集群的内存聚合成一个大型分布式内存池，从而缓存海量 KV Cache。每个缓存的 KV 都能被所有的 SGLang 实例共享，这在相同内存预算下显著提升了整体命中率。因此，在大规模集群场景下，Mooncake 不仅能够有效降低推理延迟，还能显著提升吞吐量。
 
-上述实验的细节详见我们的[blog](https://kvcache-ai.github.io/Mooncake/performance/sglang-hicache-benchmark-results-v1.html)。对 HiCache 的介绍可以参见 SGLang 的[blog](https://lmsys.org/blog/2025-09-10-sglang-hicache/)和[Strata](https://arxiv.org/abs/2508.18572)这篇论文。
+更多实验细节可参考我们的 [benchmark blog](https://kvcache-ai.github.io/Mooncake/performance/sglang-hicache-benchmark-results-v1.html)。关于 HiCache 的更完整介绍，可以参见 [SGLang 的 blog](https://lmsys.org/blog/2025-09-10-sglang-hicache/) 以及论文 [Strata](https://arxiv.org/abs/2508.18572)。
 
 ## 技术实现与优化
 
