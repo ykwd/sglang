@@ -36,7 +36,7 @@ SGLang 是一个高性能的大语言模型推理服务框架，专为大规模�
 
 ![HiCache Architecture](./resources/HiCache_Arch.png)
 
-### 元数据管理：HiRadixTree
+### 本地元数据管理：HiRadixTree
 
 在 KV Cache 的数据组织方面，HiCache 延续了 RadixAttention 的 RadixTree，提出了 HiRadixTree。RadixTree 中每一个节点对应于 GPU 中的若干连续 token 的 KV Cache。每一条从根到叶子节点的路径就代表了一条请求的前缀，多个请求的公共前缀可以共享节点，从而避免数据的冗余。关于 RadixAttention，更多细节可参见 SGLang 的[blog](https://lmsys.org/blog/2024-01-17-sglang/)和这篇[知乎文章](https://zhuanlan.zhihu.com/p/2511078239)。
 
