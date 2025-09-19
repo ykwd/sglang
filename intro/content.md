@@ -6,13 +6,13 @@
 
 经过大家数月的努力，目前HiCache已经[成功发布啦](https://lmsys.org/blog/2024-01-17-sglang/)！我们很开心能在这里做一个HiCache相关的技术分享，抛砖引玉。下面我们会首先介绍SGLang HiCache的背景和整体架构，然后详细介绍HiCache的一些实现细节和遇到的挑战，最后介绍接下来会做的一些工作。
 
-**同时也欢迎大家来使用和贡献代码! 使用我们的Mooncake作为HiCache后端的方法可以参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。**
+**同时也欢迎大家来使用和贡献代码! HiCache+Mooncake的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。**
 
 ## SGLang HiCache 简介
 
-SGLang是一个高性能的大语言模型推理服务框架，专为大规模部署和优化推理性能而设计。HiCache（Hierarchical KV Cache）是SGLang中引入的一项关键技术创新，旨在解决现有KV Cache系统面临的容量瓶颈问题。在长上下文和多轮对话场景中，现有的RadixAttention虽然能够有效复用GPU内存中的KV Cache，但随着上下文长度增长和并发客户端增加，缓存命中率会显著下降，因为大部分旧的KV Cache必须被踢出取，为新数据腾出空间。
+SGLang是一个高性能的大语言模型推理服务框架，专为大规模部署和优化推理性能而设计。HiCache（Hierarchical KV Cache）是SGLang中引入的一项关键技术创新，旨在解决现有KV Cache系统面临的容量瓶颈问题。在长上下文和多轮对话场景中，现有的RadixAttention虽然能够有效复用GPU内存中的KV Cache，但随着上下文长度增长和并发客户端增加，缓存命中率会显著下降，因为大部分旧的KV Cache必须被踢出去，为新数据腾出空间。
 
-针对上述挑战，HiCache应运而生。HiCache通过引入HiRadixTree作为页表来引用位于本地GPU显存和CPU内存中的KV Cache，并配备一个缓存控制器自动管理跨层级的KV缓存数据加载和备份，以及远程KV Cache的读取和写入，从而将GPU、CPU、SSD的“闲置”存储空间都利用起来，并依赖Mooncake、3FS、NIXL等分布式存储系统对全局的KV Cache进行存储和管理，在保障读取性能的同时大大提升了KV Cache的容量
+针对上述挑战，HiCache应运而生。HiCache通过引入HiRadixTree作为页表来引用位于本地GPU显存和CPU内存中的KV Cache，并通过Cache Controller自动管理跨层级的KV Cache数据加载和备份，以及远程KV Cache的读取和写入，从而将GPU、CPU、SSD的“闲置”存储空间都利用起来，并依赖Mooncake、3FS、NIXL等分布式存储系统对全局的KV Cache进行存储和管理，在保障读取性能的同时大大提升了KV Cache的容量
 
 ![multiturn-per-turn](./resources/hicache_multi_turn_per_turn.png)
 
@@ -33,31 +33,31 @@ SGLang是一个高性能的大语言模型推理服务框架，专为大规模�
 
 ### 元数据管理：HiRadixTree
 
-在KV cache的数据组织方面，HiCache延续了RadixAttention的RadixTree，提出了HiRadixTree。RadixTree中每一个节点对应于GPU中的若干连续token的kv cache。每一条从根到叶子节点的路径就代表了一条请求的前缀，多个请求的公共前缀可以共享节点，从而避免数据的冗余。关于RadixAttention，更多细节可参见SGLang的[blog](https://lmsys.org/blog/2024-01-17-sglang/)和这篇[知乎文章](https://zhuanlan.zhihu.com/p/2511078239)。
+在KV Cache的数据组织方面，HiCache延续了RadixAttention的RadixTree，提出了HiRadixTree。RadixTree中每一个节点对应于GPU中的若干连续token的KV Cache。每一条从根到叶子节点的路径就代表了一条请求的前缀，多个请求的公共前缀可以共享节点，从而避免数据的冗余。关于RadixAttention，更多细节可参见SGLang的[blog](https://lmsys.org/blog/2024-01-17-sglang/)和这篇[知乎文章](https://zhuanlan.zhihu.com/p/2511078239)。
 
 ![Radix Attention](./resources/radix_attn.jpg)
 
-与此类似，HiRadixTree中，每一个节点对应于若干连续token的kv cache，并记录了这个节点的kv cache存储在本地GPU显存、CPU内存、L3存储、亦或是其中的多个。如果kv cache存储在本地，则会详细记录其对应的存储地址。而出于性能的考虑，HiRadixTree不会存储或实时同步L3 kv cache的元数据信息，在需要读取L3数据时，会通过RPC向L3的后端实时查询所需读取数据的元数据信息，如是否存在、存储在哪台服务器的什么位置等。在我们的性能测试中，向Mooncake查询元数据信息通常只需要零点几到2毫秒的时间。
+与此类似，HiRadixTree中，每一个节点对应于若干连续token的KV Cache，并记录了这个节点的KV Cache存储在本地GPU显存、CPU内存、L3存储、亦或是其中的多个。如果KV Cache存储在本地，则会详细记录其对应的存储地址。而出于性能的考虑，HiRadixTree不会存储或实时同步L3 KV Cache的元数据信息，在需要读取L3数据时，会通过RPC向L3的后端实时查询所需读取数据的元数据信息，如是否存在、存储在哪台服务器的什么位置等。
 
 ### 整体工作流
 
-HiCache的工作流程主要涉及两个关键操作：预取和写回。当系统收到新的请求时，会首先在本地的L1和L2中查找匹配的KV缓存。对于本地未命中的部分，则会尝试从L3中预取。在预取结束后，将所有KV Cache加载到GPU中进行计算。在Prefill计算结束后，则会考虑将新的数据存入L2或L3。
+HiCache的工作流程主要涉及两个关键操作：预取和写回。当系统收到新的请求时，会首先在本地的L1和L2中查找匹配的KV Cache。对于本地未命中的部分，则会尝试从L3中预取。在预取结束后，将所有KV Cache加载到GPU中进行计算。在Prefill计算结束后，则会考虑将新的数据存入L2或L3。
 
 ![HiCache Workflow](./resources/hicache_workflow.png)
 
 ### 数据预取
 
-数据预取是HiCache的核心优化技术之一，旨在提前将L3存储中的KV缓存加载到L2主机内存中，以减少后续访问时的延迟。预取的效率直接决定了Prefill的性能，因此，HiCache采用了多层次的策略和优化机制。
+数据预取是HiCache的核心优化技术之一，旨在提前将L3存储中的KV Cache加载到L2本地内存中，以减少后续访问时的延迟。预取的效率直接决定了Prefill的性能，因此，HiCache采用了多层次的策略和优化机制。
 
-**预取触发条件**：系统在检测到新的Prefill请求时，会首先在本地L1和L2中查找匹配的连续前缀的KV缓存C1。对于本地未命中的部分，系统会查询L3，得到C1之后的连续命中的KV缓存C2的元数据，如果C2长度超过阈值（默认256个token，可配置），则执行预取操作。
+**预取触发条件**：系统在检测到新的Prefill请求时，会首先在本地L1和L2中查找匹配的连续前缀的KV Cache C1。对于本地未命中的部分，系统会查询L3，得到C1之后的连续命中的KV Cache C2的元数据，如果C2长度超过阈值（默认256个token，可配置），则执行预取操作。
 
 ![Prefill Token分类](./resources/prefill_token_classification.png)
 
 **前缀感知**：算法保障取得的KV Cache一定是完整连续的前缀，需要重新计算的部分则为完整连续的后缀，如上图所示，从而方便了计算部分的实现。
 
-**多线程、异步计算**： 数据预取采用了多线程、异步计算的方式提高预取效率。线程`prefetch_thread_func`会不断从`prefetch_queue`中取出可能需要预取操作的Prefill请求，并查询L3得到C2，若C2超过阈值，则会放入等待预取的`prefetch_buffer`。同时，` prefetch_io_aux_func`线程会不断从`prefetch_buffer`中取出并通过L3的后端执行预取请求。对于需要预取的数据，Mooncake会通过传输速度可达每秒数十GB甚至更多的RDMA，并行地从远程存储节点中读取数据。这个设计让数据预取可以高效快速地完成。
+**多线程、异步计算**： 数据预取采用了多线程、异步计算的方式提高预取效率。线程`prefetch_thread_func`会不断从`prefetch_queue`中取出可能需要预取操作的Prefill请求，并查询L3得到C2，若C2超过阈值，则会放入等待预取的`prefetch_buffer`。同时，` prefetch_io_aux_func`线程会不断从`prefetch_buffer`中取出预取请求，并提交L3的后端执行。对于需要预取的数据，Mooncake会通过RDMA，并行地从多个远程存储节点中读取数据。这个设计让数据预取可以高效快速地完成。
 
-**丰富、实用、灵活的预取策略**：预取操作面临一个时间不确定性的挑战。预取完成时间取决于多种因素，如网络状况、存储后端性能、数据大小（由模型、参数、需要预取的token数量等确定）等，很难准确预测。如果等待时间过长，会导致prefill计算延迟显著增加，影响整体推理性能；如果等待时间太短，预取操作可能还没完成就被终止，导致无法利用预取的结果，浪费了预取的开销。因此，HiCache提供了三种不同的预取停止策略来应对不同的场景需求：
+**丰富、实用、灵活的预取策略**：预取操作面临一个时间不确定性的挑战。预取完成时间取决于多种因素，如网络状况、存储后端的负载、数据大小（由模型、参数、需要预取的token数量等确定）等，很难准确预测。如果等待时间过长，会导致prefill计算延迟显著增加，影响整体推理性能；如果等待时间太短，预取操作可能还没完成就被终止，导致无法利用预取的结果，浪费了预取的开销。因此，HiCache提供了三种不同的预取停止策略来应对不同的场景需求：
 - **best_effort**：尽力而为模式，GPU可以执行prefill计算时即立刻终止，不会有任何等待时间，适合对延迟极其敏感的场景。
 - **wait_complete**：等待完成模式，必须等待所有预取操作完成，适合对缓存命中率要求极高的场景
 - **timeout**：超时模式，在指定时间后或完成时终止，平衡了延迟和缓存命中率的需求。
@@ -76,28 +76,27 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 ### 数据写回
 
-数据写回机制负责将频繁访问的KV缓存从L1逐步写回到L2和L3，实现更为长期和大容量的存储，以及跨实例的缓存共享。
+数据写回机制负责将频繁访问的KV Cache从L1逐步写回到L2和L3，实现更为长期和大容量的存储，以及跨实例的缓存共享。
 
 
 **可配置的写回策略**：HiCache支持三种写入策略：
 - **write_through**：每次访问都立即写回到下一层。在带宽允许的情况下，这种策略提供了最强的缓存收益。
-- **write_through_selective**：访问频率达到阈值
-后才写回到下一层。这种策略只备份热点数据，减少I/O负载。
+- **write_through_selective**：访问频率达到阈值后才写回到下一层。这种策略只备份热点数据，减少I/O负载。
 - **write_back**：在被上一层evict时才写回到下一层。这个策略可以有效缓解存储压力，适合存储容量有限但需要最大化内存利用率的场景。
 
-用户可根据具体的硬件配置和性能需求选择最适合的写回策略
+用户可根据具体的系统配置、使用场景和性能需求选择最适合的写回策略
 
-**多线程、异步的写回**：数据写回采用了多线程、异步计算的方式提高写回效率。写回操作以HiRadixTree中的一个节点中的KV Cache为单位，当该节点的KV Cache达到对应写回策略的写回条件时，系统会触发写回操作。
+**多线程、异步的写回**：数据写回采用了多线程、异步计算的方式提高写回效率。写回操作以HiRadixTree中的一个节点中的KV Cache为单位，当该节点的KV Cache达到相应条件时，系统会触发写回操作。
 
 当数据从L1写回到L2时，会调用`write_backup`函数，使用GPU流进行异步数据传输，避免阻塞主调度流程。
 
-当数据从L2写回到L3存储时，系统会调用`write_backup_storage`函数，将写回操作放入`backup_queue`队列中。专门的`backup_thread_func`线程会不断从队列中取出写回操作并调用L3后端执行数据传输。和预取类似，Mooncake可以通过RDMA，并行、高速地完成数据的传输。
+当数据从L2写回到L3存储时，系统会调用`write_backup_storage`函数，将写回操作放入`backup_queue`中。专门的`backup_thread_func`线程会不断从队列中取出写回操作并调用L3后端执行数据传输。和预取类似，Mooncake可以通过RDMA，并行、高速地完成数据的传输。
 
 **跨实例共享**：在从L2写回到L3时，只有L3中尚未存在的数据会通过数据传输进行写回。写回到L3的KV Cache可被集群中所有SGLang实例共享，在相同的内存预算下显著提升了缓存命中率。
 
 ### 多Rank间的同步机制
 
-在多卡并行计算时，例如在多TP计算时，HiCache需要确保多个rank之间的状态一致性。因此，在计算的关键步骤均需要使用`all_reduce`来同步状态。例如，在prefetch时，首先需要使用`all_reduce(op=min)`来确保所有rank获得相同的L3命中数量，避免不同rank对于是否达到预取阈值有不同的判断；在完成或终止预取后，同样也需要使用`all_reduce(op=min)`确保所有rank对已有kv cache缓存的前缀长度取得共识。
+在多卡并行计算时，例如在多TP计算时，HiCache需要确保多个rank之间的状态一致性。因此，在计算的关键步骤均需要使用`all_reduce`来同步状态。例如，在prefetch时，首先需要使用`all_reduce(op=min)`来确保所有rank获得相同的L3命中数量，避免不同rank对于是否达到预取阈值有不同的判断；在完成或终止预取后，同样也需要使用`all_reduce(op=min)`确保所有rank对成功获取的KV Cache的前缀长度取得共识。
 
 ### 数据传输优化
 
@@ -151,4 +150,5 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 因此我们后续会考虑将HiRadixTree的前缀信息传递到L3存储后端，使其能够同时基于数据访问信息和前缀信息做出决策。
 
 注1：文中的部分图片来自[SGLang Blog](https://lmsys.org/) 和 [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/)，非常感谢。
+
 注2：目前[page first direct的pr](https://github.com/sgl-project/sglang/pull/10060)和[动态计算预取timeout的pr](https://github.com/sgl-project/sglang/pull/10512)暂时还没merge到主线。
