@@ -118,10 +118,22 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 **Page First Direct**
 
-## 未来规划
+### 和PD分离部署模式的结合
 
-**多种不同的dp或tp配置共享数据**
+此前，SGLang已经支持通过Mooncake TransferEngine实现PD（Prefill-Decode）分离部署模式（相关资料参见[这个blog](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration-v1.html)）。这种架构将预填充和解码阶段分离到不同节点，P节点专门负责处理预填充阶段的计算，D节点专门负责解码阶段的计算。
 
-**前缀感知的Eviction**
+在PD分离部署模式下，可以在Prefill节点开启HiCache来优化预填充性能。通过HiCache的分层缓存机制，P节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。目前只需要部署一套Mooncake，即可体验到上述优化 ^_^
+
+## 下一步工作讨论
+
+**不同TP Size的实例共享KV Cache**：在大规模部署中，特别是在异构环境中，集群内可能存在不同TP size的SGLang实例。当前的HiCache实现存在一个限制：当TP size大于1时，每个token的KV cache会被拆分到不同的rank中，每个rank只存储1/tp_size的数据。这意味着在L3存储中，同一个token的KV cache会以tp_size个不同的对象形式存储。
+
+这种设计导致了一个重要问题：即使不同TP size的实例处理相同的模型和相同的前缀，由于KV cache的拆分粒度不同，它们无法共享L3存储中的KV cache数据。例如，一个TP=2的实例和一个TP=4的实例处理相同的输入序列时，它们的KV cache在L3中存储为不同粒度的对象，无法实现跨实例的缓存共享。
+
+下一步我们会实现KV cache数据的动态重组，在零拷贝的前提下，实现不同TP size配置的KV Cache的数据共享。
+
+**前缀感知的Eviction**：当前HiCache的eviction策略在不同层级采用了不同的策略。在L1和L2层级，系统会从HiRadixTree的叶子节点开始eviction，这种设计避免了在前缀上出现空洞，确保缓存的前缀完整性。然而，L3存储后端目前缺乏前缀信息，只能采用传统的LRU等算法进行对象级别的eviction，这可能导致重要的前缀数据被误删。但是，L3只从叶子删除也有缺陷，因为热点数据可能在L1和L2里已有保留，L3再重复存储也可能造成空间浪费。
+
+因此我们后续会考虑将HiRadixTree的前缀信息传递到L3存储后端，使其能够同时基于数据访问信息和前缀信息做出决策。
 
 注：文中的部分图片来自[SGLang Blog](https://lmsys.org/) 和 [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/)，非常感谢。
