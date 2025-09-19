@@ -12,7 +12,7 @@
 
 SGLang是一个高性能的大语言模型推理服务框架，专为大规模部署和优化推理性能而设计。HiCache（Hierarchical KV Cache）是SGLang中引入的一项关键技术创新，旨在解决现有KV Cache系统面临的容量瓶颈问题。在长上下文和多轮对话场景中，现有的RadixAttention虽然能够有效复用GPU内存中的KV Cache，但随着上下文长度增长和并发客户端增加，缓存命中率会显著下降，因为大部分旧的KV Cache必须被踢出去，为新数据腾出空间。
 
-针对上述挑战，HiCache应运而生。HiCache通过引入HiRadixTree作为页表来引用位于本地GPU显存和CPU内存中的KV Cache，并通过Cache Controller自动管理跨层级的KV Cache数据加载和备份，以及远程KV Cache的读取和写入，从而将GPU、CPU、SSD的“闲置”存储空间都利用起来，并依赖Mooncake、3FS、NIXL等分布式存储系统对全局的KV Cache进行存储和管理，在保障读取性能的同时大大提升了KV Cache的容量
+针对上述挑战，HiCache应运而生。HiCache通过引入HiRadixTree作为页表来引用位于本地GPU显存和CPU内存中的KV Cache，并通过Cache Controller自动管理跨层级的KV Cache数据加载和备份，以及远程KV Cache的读取和写入，从而将GPU、CPU、SSD的“闲置”存储空间都利用起来，并依赖Mooncake、3FS、NIXL等分布式存储系统对全局的KV Cache进行存储和管理，在保障读取性能的同时大大提升了KV Cache的容量。
 
 ![multiturn-per-turn](./resources/hicache_multi_turn_per_turn.png)
 
@@ -27,7 +27,7 @@ SGLang是一个高性能的大语言模型推理服务框架，专为大规模�
 
 ### 整体架构
 
-在现在的不少CPU架构中，速度快、容量小的L1和L2 cache是每个核心私有的，用于快速存取最热点的数据，而最大的L3 cache则是所有核心共享的，这可以显著降低cache内的数据冗余程度。与此类似，HiCache中L1和L2为每个推理实例的私有KV cache，而L3的KV cache则为整个集群内所有推理实例共享，
+在现在的不少CPU架构中，速度快、容量小的L1和L2 cache是每个核心私有的，用于快速存取最热点的数据，而最大的L3 cache则是所有核心共享的，这可以显著降低cache内的数据冗余程度。与此类似，HiCache中L1和L2为每个推理实例的私有KV Cache，而L3的KV Cache则为整个集群内所有推理实例共享。
 
 ![HiCache Architecture](./resources/HiCache_Arch.png)
 
@@ -124,7 +124,7 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 此前，SGLang已经支持通过Mooncake TransferEngine实现PD（Prefill-Decode）分离部署模式（相关资料参见[这个blog](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration-v1.html)）。这种架构将Prefill和Decode阶段分离到不同节点，P节点专门负责处理Prefill阶段的计算，D节点专门负责Decode阶段的计算。
 
-在PD分离部署模式下，可以在Prefill节点开启HiCache来优化Prefill性能。通过HiCache的分层缓存机制，P节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。目前只需要部署一套Mooncake，即可完整体验到上述优化 ^_^
+在PD分离部署模式下，可以在Prefill节点开启HiCache来优化Prefill性能。通过HiCache+Mooncake Store的分层缓存机制，P节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。目前只需要部署一套Mooncake，即可完整体验到上述优化 ^_^
 
 ## 下一步工作讨论
 
@@ -138,6 +138,6 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 因此我们后续会考虑将HiRadixTree的前缀信息传递到L3存储后端，使其能够同时基于数据访问信息和前缀信息做出决策。
 
-注1：文中的部分图片来自[SGLang Blog](https://lmsys.org/) 和 [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/)，非常感谢。
+注1：文中的部分图片来自[SGLang Blog](https://lmsys.org/), [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/) 和蚂蚁的[晟海](https://github.com/huangtingwei9988)，非常感谢。
 
 注2：目前[page first direct的pr](https://github.com/sgl-project/sglang/pull/10060)和[动态计算预取timeout的pr](https://github.com/sgl-project/sglang/pull/10512)暂时还没merge到主线。
