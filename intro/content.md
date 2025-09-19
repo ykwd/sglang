@@ -6,7 +6,7 @@
 
 经过大家数月的努力，目前HiCache已经[成功发布啦](https://lmsys.org/blog/2024-01-17-sglang/)！我们很开心能在这里做一个HiCache相关的技术分享，抛砖引玉。下面我们会首先介绍SGLang HiCache的背景和整体架构，然后详细介绍HiCache的一些实现细节和遇到的挑战，最后介绍接下来会做的一些工作。
 
-**HiCache+Mooncake的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。欢迎大家来使用和贡献代码!我们期待更多开发者一起来打磨与拓展这个生态。**
+**HiCache+Mooncake的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。欢迎大家来使用和贡献代码！我们期待更多开发者一起来打磨与拓展这个生态。**
 
 ## SGLang HiCache 简介
 
