@@ -4,7 +4,7 @@
 
 然而，随着上下文长度增长和并发请求增加，KV Cache 的容量瓶颈问题日益凸显：GPU 内存容量是很有限的，但请求的上下文长度和 SLO 要求是无限的。RadixAttention 解决了前缀复用问题，但没有解决容量瓶颈问题。于是，SGLang 干脆把现代 CPU 的"三级缓存"这一经典设计搬到了大模型里。这就是 HiCache：GPU 显存当 L1，Host 内存当 L2，Mooncake、3FS、NIXL 等分布式缓存当 L3。设计思路直白，效果却十分惊艳——既缓解了 KV Cache 的容量焦虑，又把性能拉到了新高度。
 
-经过大家数月的努力，目前 HiCache 已经[成功发布啦](https://lmsys.org/blog/2024-01-17-sglang/)！我们很开心能在这里做一个 HiCache 相关的技术分享，抛砖引玉。下面我们会首先介绍 SGLang HiCache 的背景和整体架构，然后详细介绍 HiCache 的一些实现细节和遇到的挑战，最后介绍接下来会做的一些工作。
+经过大家数月的努力，目前 HiCache 已经[成功发布啦](https://lmsys.org/blog/2025-09-10-sglang-hicache/)！我们很开心能在这里做一个 HiCache 相关的技术分享，抛砖引玉。下面我们会首先介绍 SGLang HiCache 的背景和整体架构，然后详细介绍 HiCache 的一些实现细节和遇到的挑战，最后介绍接下来会做的一些工作。
 
 **HiCache+Mooncake 的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。欢迎大家来使用和贡献代码！我们期待更多开发者一起来打磨与拓展这个生态。**
 
