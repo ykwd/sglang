@@ -8,6 +8,8 @@
 
 **HiCache+Mooncake 的使用方法参见[这篇文档](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1)。欢迎大家来使用和贡献代码！我们期待更多开发者一起来打磨与拓展这个生态。**
 
+注：近期 HiCache 官方文档也会发布到[这里](https://docs.sglang.ai/)，本文的部分内容也会贡献到官方文档中。
+
 ## SGLang HiCache 简介
 
 SGLang 是一个高性能的大语言模型推理服务框架，专为大规模部署和推理优化而设计。HiCache（Hierarchical KV Cache）是其中一项核心技术创新，主要用于解决现有 KV Cache 在容量上的瓶颈问题。
@@ -129,7 +131,7 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 
 此前，SGLang 已经支持通过 Mooncake TransferEngine 实现 PD（Prefill-Decode）分离部署模式（相关资料参见[这个blog](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration-v1.html)）。这种架构将 Prefill 和 Decode 阶段分离到不同节点，P 节点专门负责处理 Prefill 阶段的计算，D 节点专门负责 Decode 阶段的计算。
 
-在 PD 分离部署模式下，可以在 Prefill 节点开启 HiCache 来优化 Prefill 性能。通过 HiCache+Mooncake Store 的分层缓存机制，P 节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。目前只需要部署一套 Mooncake，即可完整体验到上述优化 ^_^
+在 PD 分离部署模式下，可以在 Prefill 节点开启 HiCache 来优化 Prefill 性能。通过 HiCache+Mooncake Store 的分层缓存机制，P 节点能够更高效地处理长上下文和多轮对话场景，显著提升预填充阶段的性能。同时，可以在 Decode 节点也开启 HiCache，将计算结果写入L3。目前只需要部署一套 Mooncake，即可完整体验到上述优化 ^_^
 
 ## 下一步工作讨论
 
@@ -144,5 +146,3 @@ timeout = prefetch_timeout_base + prefetch_timeout_per_ki_token * num_token_to_f
 因此我们后续会考虑将 HiRadixTree 的前缀信息传递到 L3 存储后端，使其能够同时基于数据访问信息和前缀信息做出决策。
 
 注1：文中的部分图片来自[SGLang Blog](https://lmsys.org/), [Mooncake Blog](https://kvcache-ai.github.io/Mooncake/) 和蚂蚁的[晟海](https://github.com/huangtingwei9988)，非常感谢。
-
-注2：目前[page first direct 的 pr](https://github.com/sgl-project/sglang/pull/10060)和[动态计算预取 timeout 的 pr](https://github.com/sgl-project/sglang/pull/10512)暂时还没 merge 到主线。
